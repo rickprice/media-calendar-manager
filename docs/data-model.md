@@ -4,7 +4,7 @@ Nov 27, 2026 · @Frederick Price
 
 ## Summary
 
-The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 18 content tables (8 of them for templates), 7 access tables, 9 small lookup tables and 1 audit table beside the existing `users` table.
+The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 18 content tables (8 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
 
 How to read this draft:
 
@@ -32,6 +32,7 @@ These are the terms the app will use in its screens and its code. The last colum
 | Milestone | A checkpoint on the way to finishing, set as a time before the video's finish date (T-minus), such as script done 10 days before, shoot day, picture lock. It moves when the finish date moves. | `milestones` |
 | Finish date (T-0) | The moment a video must be finished and ready to publish. Every video has one, even a pitch. Milestones and asset needs count back from it (T-minus) and go-live times count forward (T-plus), so moving it moves the whole plan. | `videos.finish_at` |
 | Template | A reusable starting point. A video template holds format, brief, script, a rundown of library segments, the assets it always uses, milestones timed before finish and publishing defaults per channel. Segment templates (a standard intro, a sponsor read) and series templates work the same way. Saved from an existing item or built by hand; a template can never be published itself. | `video_templates` and its child tables |
+| Workflow | A named, versioned set of stages, deadlines and allowed steps for one type of item, such as Standard or Short. Picked from a list when an item is created. A published version never changes; a change is a new version. | `workflows` |
 
 ### Structure of a video
 
@@ -113,7 +114,7 @@ Review can send a video back to post-production any number of times; only Ready 
 
 ### One shared set of states
 
-Videos, segments, assets and publications all follow the same plan, make, check, release pattern, so they share one `workflow_states` lookup table. A second small table, `workflow_state_usage`, says which states each type may use, in what order, and what to call them there. Each row stores the state's `pkid`; a composite key makes sure, for example, that a segment can only hold a state listed for segments. Every state has an `is_active` flag: switching one off hides it from new choices without breaking rows that already use it.
+Videos, segments, assets and publications all follow the same plan, make, check, release pattern, so they share one `workflow_states` lookup table. A second small table, `workflow_state_usage`, says which states each workflow version uses, in what order, what to call them there and by when. Each row stores the state's `pkid`; a composite key makes sure, for example, that a segment can only hold a state listed for segments. Every state has an `is_active` flag: switching one off hides it from new choices without breaking rows that already use it.
 
 | Shared state | Video | Segment | Asset | Publication |
 | --- | --- | --- | --- | --- |
@@ -135,13 +136,20 @@ Kinds and options that are not states use the same tiny-table pattern: `platform
 
 ### Steps between states
 
-The workflow is data. `workflow_states` lists the states, `workflow_state_usage` says which ones each type uses, and `workflow_transitions` lists every allowed step with the button text people see ("Green-light", "Send back to edit", "Skip"). An admin can add a step, relabel it or switch it off without a code change. The screen shows only the steps allowed from where an item is now, and a small trigger makes the database refuse anything else: a new item must start in its type's first state, and each change must be a listed, active step. A pitch that is turned down moves to **Dropped**, so it stays on record and out of the way.
+The workflow is data, and there can be several. A **workflow** is a named, versioned set of stages and allowed steps for one type of item, such as "Standard" or "Short" for videos. You pick one from a list when you create an item; the type's default is offered first, and a video template names the workflow its videos use. Each version lists its stages (`workflow_state_usage`, with each stage's deadline) and its allowed steps (`workflow_transitions`, with the button text people see, such as "Green-light", "Send back to edit" or "Skip").
+
+- **Draft, then published.** An admin builds or edits a version as a draft. Publishing it freezes it for good, so a video always follows exactly the rules it was planned under. To change a workflow, copy it into the next version, edit the draft and publish that.
+- **Items stay on their version.** Videos already under way keep the version they started on. An admin can move them to a newer version, one at a time or in bulk, as long as their current stage exists there; the stage never jumps during a move.
+- **Old versions stay.** An old version can be archived so nobody picks it for new work, but it is never deleted, and the audit log shows which version every item followed.
+- **The database holds the line.** The screen shows only the steps allowed from where an item is now, and triggers refuse anything else: a new item must start in the first stage of a published workflow, each change must be a step listed in its version, and a published version cannot be edited.
+
+A pitch that is turned down moves to **Dropped**, so it stays on record and out of the way.
 
 ## Proposed Postgres schema
 
-Thirty-five tables: eighteen for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, nine small lookup tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Thirty-six tables: eighteen for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
-**Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard and the check that a state change follows the workflow table. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
+**Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, and the freeze that stops a published workflow version from changing. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
 &#91;embedded content: tables and links · 7 tables\]
 
@@ -153,7 +161,7 @@ A publication joins a video to a channel, so one video can go out on YouTube and
 - **Archive instead.** People-facing tables have `one archived_at column; who archived a row, like who created or changed it, is only in the audit log`. Archiving is one click for anyone with `edit` on that object type, is logged, and can be undone. Archived rows vanish from normal pages; the audit view still shows them. Archiving never cascades: an archived video's segments and milestones stay as they were, simply unreachable from normal pages, and the assets it used stay in the calendar's asset library for other videos.
 - **A user is one stretch of employment.** Users have `started_at` and an optional `ended_at`, both full timestamps. Someone who leaves and comes back gets a new user; the same login name may be reused because the two periods cannot overlap.
 - **Roles are dated too.** Admin and auditor assignments, group memberships and grants each have `starts_at` and an optional `ends_at`. Dates can be edited, every edit is logged, and exclusion constraints refuse any change that would make two periods for the same thing overlap. No assignment or membership can start before the user's start date or end after their end date, and the database itself refuses it, so a coding mistake cannot open that hole. Each dated row carries a copy of the user's employment range; a composite foreign key with ON UPDATE CASCADE keeps the copy equal to the user's real dates, and a CHECK keeps the row's period inside it. Shortening a user's end date is refused while any of their roles still runs later, so the app ends those roles first in the same transaction. As a second guard, access is still intersected with the employment dates.
-- **Native constraints, not triggers.** Every foreign key references its parent's `pkid`. Where two parents must agree, such as a publication's video and channel being on the same calendar, the child also carries the shared column and a composite foreign key enforces it against a `UNIQUE (pkid, calendar_id)` on the parent. Triggers are kept only for the audit log, the no-delete guard and the workflow-step check, which constraints cannot express.
+- **Native constraints, not triggers.** Every foreign key references its parent's `pkid`. Where two parents must agree, such as a publication's video and channel being on the same calendar, the child also carries the shared column and a composite foreign key enforces it against a `UNIQUE (pkid, calendar_id)` on the parent. Triggers are kept only for the audit log, the no-delete guard, the workflow-step check and the workflow-version freeze, which constraints cannot express.
 - The access tree is: calendar, then series, then videos (every video is in a series), then segments, assets and milestones. Channels also sit under the calendar, and a publication joins a video to one of them. Each channel sits in exactly one calendar (guess, Q18).
 - A video publishes to every channel on its calendar by default: creating it adds a draft publication for each channel. Leaving a channel out is normal and is recorded by setting that publication to `skipped`, with an optional reason.
 - A grant gives a group a role either on a whole calendar (`calendar_grants`) or on one channel (`channel_grants`). They are separate tables, so no grant can be unclear about what it covers, and who manages a channel can change without touching the calendar's grants. A channel-only grant covers that channel and its publications (guess, Q12).
@@ -183,7 +191,8 @@ This is a sketch for review, not a migration. If you approve it, it would become
 --  * Rule one: the schema must not be able to store a state that makes no sense. Use the
 --    structure first (required links, split tables instead of optional parents, composite
 --    keys), then CHECK / UNIQUE / EXCLUDE. A trigger only when nothing else can express the
---    rule; today that is the audit log, the no-delete guard and the workflow-step check.
+--    rule; today that is the audit log, the no-delete guard, the workflow-step check and the
+--    freeze on published workflow versions.
 --  * One database per company. Nothing here names a company: everyone in this database
 --    works for the same one, and a second company gets its own instance and database.
 --    The company's name and home time zone are instance settings, not rows.
@@ -220,37 +229,55 @@ CREATE TABLE workflow_states (
     is_active  BOOLEAN NOT NULL DEFAULT TRUE
 );
 
--- Which states each type of object may use, in what order, and under what name.
+-- Workflows are versioned and chosen from a list. Each row is one version of one named workflow
+-- for one type ('Long-form' v3 for videos). A draft (published_at NULL) can be edited; once
+-- published it is frozen, and a change means a new version. Items keep the version they use.
+CREATE TABLE workflows (
+    pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    object_type  object_type NOT NULL
+                 CHECK (object_type IN ('video', 'segment', 'asset', 'publication')),
+    name         TEXT NOT NULL,             -- 'Standard', 'Short', 'Live stream'
+    version      INT  NOT NULL CHECK (version > 0),
+    description  TEXT,
+    published_at TIMESTAMPTZ,               -- NULL = draft; set = frozen and offered in the list
+    is_default   BOOLEAN NOT NULL DEFAULT FALSE,   -- offered first for its type
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    archived_at  TIMESTAMPTZ,               -- no longer offered; items already on it keep it
+    UNIQUE (object_type, name, version),
+    UNIQUE (pkid, object_type),             -- lets a video insist on a video workflow
+    CHECK (NOT is_default OR published_at IS NOT NULL)
+);
+CREATE UNIQUE INDEX ON workflows (object_type) WHERE is_default AND archived_at IS NULL;
+
+-- The states one workflow version uses, in what order, under what name, and by when.
 CREATE TABLE workflow_state_usage (
     pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_id UUID NOT NULL REFERENCES workflows(pkid),
     state_id    UUID NOT NULL REFERENCES workflow_states(pkid),
-    object_type object_type NOT NULL,
     label       TEXT,                     -- NULL = the state's own label; e.g. 'Skipped' for publications
     sort_order  INT  NOT NULL,
-    is_initial  BOOLEAN NOT NULL DEFAULT FALSE,   -- where a new row starts
+    is_initial  BOOLEAN NOT NULL DEFAULT FALSE,   -- where a new item starts
     done_before_finish INTERVAL CHECK (done_before_finish >= INTERVAL '0'),
                         -- T-minus: leave this state this long before the finish; NULL = no deadline
-    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
-    UNIQUE (state_id, object_type),           -- target for the per-type foreign keys below
-    UNIQUE (object_type, sort_order)
+    UNIQUE (workflow_id, state_id),       -- target for the items' and steps' foreign keys
+    UNIQUE (workflow_id, sort_order)
 );
-CREATE UNIQUE INDEX ON workflow_state_usage (object_type) WHERE is_initial;  -- one start per type
+CREATE UNIQUE INDEX ON workflow_state_usage (workflow_id) WHERE is_initial;  -- one start each
 
--- The workflow as data: each row is one allowed step from one state to another for one type.
--- Both ends must be states that type uses (composite keys); a step back, such as Review to
--- Post-production, is just another row. The trigger near the end refuses any other change.
+-- Each row is one allowed step in one workflow version. Both ends must be states that version
+-- uses (composite keys); a step back, such as Review to Post-production, is just another row.
+-- The trigger near the end refuses any other change.
 CREATE TABLE workflow_transitions (
     pkid          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    object_type   object_type NOT NULL,
+    workflow_id   UUID NOT NULL REFERENCES workflows(pkid),
     from_state_id UUID NOT NULL,
     to_state_id   UUID NOT NULL,
     label         TEXT,                     -- button text, e.g. 'Send back to edit'
     sort_order    INT  NOT NULL,
-    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     CHECK (from_state_id <> to_state_id),
-    UNIQUE (object_type, from_state_id, to_state_id),
-    FOREIGN KEY (from_state_id, object_type) REFERENCES workflow_state_usage (state_id, object_type),
-    FOREIGN KEY (to_state_id,   object_type) REFERENCES workflow_state_usage (state_id, object_type)
+    UNIQUE (workflow_id, from_state_id, to_state_id),
+    FOREIGN KEY (workflow_id, from_state_id) REFERENCES workflow_state_usage (workflow_id, state_id),
+    FOREIGN KEY (workflow_id, to_state_id)   REFERENCES workflow_state_usage (workflow_id, state_id)
 );
 
 CREATE TABLE platforms (
@@ -279,8 +306,14 @@ INSERT INTO workflow_states (code, label, sort_order) VALUES
     ('published', 'Published', 110),      ('not_needed', 'Not needed', 120),
     ('removed', 'Removed', 130);
 
-INSERT INTO workflow_state_usage (state_id, object_type, label, sort_order, is_initial)
-SELECT s.pkid, u.object_type::object_type, u.label, u.sort_order, u.is_initial
+-- Version 1 of a 'Standard' workflow for each type, and a 'Short' one for videos with tighter
+-- deadlines. Created as drafts, filled in, then published.
+INSERT INTO workflows (object_type, name, version) VALUES
+    ('video', 'Standard', 1), ('video', 'Short', 1), ('segment', 'Standard', 1),
+    ('asset', 'Standard', 1), ('publication', 'Standard', 1);
+
+INSERT INTO workflow_state_usage (workflow_id, state_id, label, sort_order, is_initial)
+SELECT w.pkid, s.pkid, u.label, u.sort_order, u.is_initial
   FROM (VALUES
     ('pitch',           'video',       NULL,        10, TRUE),
     ('pre_production',  'video',       NULL,        20, FALSE),
@@ -307,11 +340,12 @@ SELECT s.pkid, u.object_type::object_type, u.label, u.sort_order, u.is_initial
     ('not_needed',      'publication', 'Skipped',   40, FALSE),
     ('removed',         'publication', NULL,        50, FALSE)
   ) AS u(code, object_type, label, sort_order, is_initial)
-  JOIN workflow_states s ON s.code = u.code;
+  JOIN workflow_states s ON s.code = u.code
+  JOIN workflows w ON w.object_type = u.object_type::object_type AND w.name = 'Standard';
 
--- First guess at the allowed steps; admins can add, relabel or switch them off later.
-INSERT INTO workflow_transitions (object_type, from_state_id, to_state_id, label, sort_order)
-SELECT t.object_type::object_type, f.pkid, d.pkid, t.label, t.sort_order
+-- First guess at the allowed steps; admins change them by publishing a new version.
+INSERT INTO workflow_transitions (workflow_id, from_state_id, to_state_id, label, sort_order)
+SELECT w.pkid, f.pkid, d.pkid, t.label, t.sort_order
   FROM (VALUES
     ('video', 'pitch', 'pre_production', 'Green-light', 10),
     ('video', 'pitch', 'not_needed', 'Drop', 20),
@@ -346,15 +380,35 @@ SELECT t.object_type::object_type, f.pkid, d.pkid, t.label, t.sort_order
     ('publication', 'not_needed', 'planned', 'Un-skip', 60)
   ) AS t(object_type, from_code, to_code, label, sort_order)
   JOIN workflow_states f ON f.code = t.from_code
-  JOIN workflow_states d ON d.code = t.to_code;
+  JOIN workflow_states d ON d.code = t.to_code
+  JOIN workflows w ON w.object_type = t.object_type::object_type AND w.name = 'Standard';
+
+-- 'Short' starts as a copy of the standard video workflow.
+INSERT INTO workflow_state_usage (workflow_id, state_id, label, sort_order, is_initial)
+SELECT sh.pkid, u.state_id, u.label, u.sort_order, u.is_initial
+  FROM workflow_state_usage u
+  JOIN workflows st ON st.pkid = u.workflow_id AND st.object_type = 'video' AND st.name = 'Standard'
+  JOIN workflows sh ON sh.object_type = 'video' AND sh.name = 'Short';
+INSERT INTO workflow_transitions (workflow_id, from_state_id, to_state_id, label, sort_order)
+SELECT sh.pkid, t.from_state_id, t.to_state_id, t.label, t.sort_order
+  FROM workflow_transitions t
+  JOIN workflows st ON st.pkid = t.workflow_id AND st.object_type = 'video' AND st.name = 'Standard'
+  JOIN workflows sh ON sh.object_type = 'video' AND sh.name = 'Short';
 
 -- First guess at each video stage's deadline, counted back from the finish (all guesses).
 UPDATE workflow_state_usage u SET done_before_finish = d.before::interval
-  FROM (VALUES ('pitch', '28 days'), ('pre_production', '14 days'), ('production', '7 days'),
-               ('post_production', '3 days'), ('in_review', '1 day'), ('ready', '0')
-       ) AS d(code, before)
+  FROM (VALUES ('Standard', 'pitch', '28 days'), ('Standard', 'pre_production', '14 days'),
+               ('Standard', 'production', '7 days'), ('Standard', 'post_production', '3 days'),
+               ('Standard', 'in_review', '1 day'), ('Standard', 'ready', '0'),
+               ('Short', 'pitch', '7 days'), ('Short', 'pre_production', '4 days'),
+               ('Short', 'production', '3 days'), ('Short', 'post_production', '1 day'),
+               ('Short', 'in_review', '12 hours'), ('Short', 'ready', '0')
+       ) AS d(workflow, code, before)
   JOIN workflow_states s ON s.code = d.code
- WHERE u.state_id = s.pkid AND u.object_type = 'video';
+  JOIN workflows w ON w.object_type = 'video' AND w.name = d.workflow
+ WHERE u.state_id = s.pkid AND u.workflow_id = w.pkid;
+
+UPDATE workflows SET published_at = NOW(), is_default = (name = 'Standard');
 
 INSERT INTO platforms (code, label, sort_order) VALUES
     ('youtube', 'YouTube', 10), ('facebook', 'Facebook', 20), ('other', 'Other', 90);
@@ -474,8 +528,8 @@ CREATE TABLE role_permissions (               -- one row per type; lowering acce
 );
 
 -- ===== Content: calendar at the top =====
--- Rows with a workflow state carry state_id plus a fixed state_scope column; the composite
--- key on the pair means a video can only hold a state that is listed for videos, and so on.
+-- Rows with a workflow state carry workflow_id, a fixed workflow_type and state_id. One composite
+-- key means a video can only follow a video workflow; another, only hold a state its workflow uses.
 -- archived_at hides a row from normal pages. It never cascades: archiving a video leaves its
 -- segments, milestones and publications as they are, just unreachable from normal pages.
 CREATE TABLE calendars (
@@ -552,8 +606,9 @@ CREATE TABLE videos (
     episode_number    INT,
     working_title     TEXT NOT NULL,
     format_id         UUID NOT NULL REFERENCES video_formats(pkid),
+    workflow_id       UUID NOT NULL REFERENCES workflows(pkid),  -- picked from the list
+    workflow_type     object_type NOT NULL DEFAULT 'video' CHECK (workflow_type = 'video'),
     state_id          UUID NOT NULL REFERENCES workflow_states(pkid),
-    state_scope       object_type NOT NULL DEFAULT 'video' CHECK (state_scope = 'video'),
     brief             TEXT,                -- the pitch; a pitch is a video in the 'Pitch' state
     script            TEXT,
     finish_at         TIMESTAMPTZ NOT NULL,  -- T-0: when it must be finished, ready to publish.
@@ -563,7 +618,8 @@ CREATE TABLE videos (
     archived_at       TIMESTAMPTZ,
     UNIQUE (pkid, calendar_id),
     FOREIGN KEY (series_id, calendar_id) REFERENCES series (pkid, calendar_id),  -- series on same calendar
-    FOREIGN KEY (state_id, state_scope)  REFERENCES workflow_state_usage (state_id, object_type)
+    FOREIGN KEY (workflow_id, workflow_type) REFERENCES workflows (pkid, object_type),
+    FOREIGN KEY (workflow_id, state_id)      REFERENCES workflow_state_usage (workflow_id, state_id)
 );
 CREATE UNIQUE INDEX ON videos (series_id, episode_number)
     WHERE archived_at IS NULL AND episode_number IS NOT NULL;  -- no two episode 5s in a series
@@ -577,12 +633,14 @@ CREATE TABLE segments (
     title           TEXT NOT NULL,
     script          TEXT,
     planned_seconds INT CHECK (planned_seconds >= 0),
+    workflow_id     UUID NOT NULL REFERENCES workflows(pkid),  -- picked from the list
+    workflow_type   object_type NOT NULL DEFAULT 'segment' CHECK (workflow_type = 'segment'),
     state_id        UUID NOT NULL REFERENCES workflow_states(pkid),
-    state_scope     object_type NOT NULL DEFAULT 'segment' CHECK (state_scope = 'segment'),
     archived_at     TIMESTAMPTZ,
     UNIQUE (pkid, calendar_id),
     FOREIGN KEY (video_id, calendar_id) REFERENCES videos (pkid, calendar_id),
-    FOREIGN KEY (state_id, state_scope) REFERENCES workflow_state_usage (state_id, object_type),
+    FOREIGN KEY (workflow_id, workflow_type) REFERENCES workflows (pkid, object_type),
+    FOREIGN KEY (workflow_id, state_id)      REFERENCES workflow_state_usage (workflow_id, state_id),
     -- positions are unique among live segments only; deferred so a reorder can swap rows
     EXCLUDE (video_id WITH =, position WITH =) WHERE (archived_at IS NULL)
         DEFERRABLE INITIALLY DEFERRED
@@ -595,8 +653,9 @@ CREATE TABLE assets (
     calendar_id        UUID NOT NULL REFERENCES calendars(pkid),
     kind_id            UUID NOT NULL REFERENCES asset_kinds(pkid),
     name               TEXT NOT NULL,
+    workflow_id        UUID NOT NULL REFERENCES workflows(pkid),  -- picked from the list
+    workflow_type      object_type NOT NULL DEFAULT 'asset' CHECK (workflow_type = 'asset'),
     state_id           UUID NOT NULL REFERENCES workflow_states(pkid),
-    state_scope        object_type NOT NULL DEFAULT 'asset' CHECK (state_scope = 'asset'),
     location           TEXT,               -- URL or file path; the app stores no files (Q6)
                                            -- no due date here: each use says when it is needed
     notes              TEXT,
@@ -606,7 +665,8 @@ CREATE TABLE assets (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at        TIMESTAMPTZ,
     UNIQUE (pkid, calendar_id),
-    FOREIGN KEY (state_id, state_scope) REFERENCES workflow_state_usage (state_id, object_type)
+    FOREIGN KEY (workflow_id, workflow_type) REFERENCES workflows (pkid, object_type),
+    FOREIGN KEY (workflow_id, state_id)      REFERENCES workflow_state_usage (workflow_id, state_id)
 );
 
 -- Where an asset is used. Videos and segments pull assets in; neither is the asset's parent.
@@ -646,8 +706,9 @@ CREATE TABLE publications (
     calendar_id   UUID NOT NULL REFERENCES calendars(pkid),
     video_id      UUID NOT NULL REFERENCES videos(pkid),
     channel_id    UUID NOT NULL REFERENCES channels(pkid),
+    workflow_id   UUID NOT NULL REFERENCES workflows(pkid),  -- picked from the list
+    workflow_type object_type NOT NULL DEFAULT 'publication' CHECK (workflow_type = 'publication'),
     state_id      UUID NOT NULL REFERENCES workflow_states(pkid),
-    state_scope   object_type NOT NULL DEFAULT 'publication' CHECK (state_scope = 'publication'),
     skip_reason   TEXT,                    -- optional note when skipped
     visibility_id UUID NOT NULL REFERENCES visibilities(pkid),
     is_premiere   BOOLEAN NOT NULL DEFAULT FALSE,
@@ -663,7 +724,8 @@ CREATE TABLE publications (
     UNIQUE (video_id, channel_id),          -- one publication per video per channel
     FOREIGN KEY (video_id, calendar_id)   REFERENCES videos   (pkid, calendar_id),   -- channel and video
     FOREIGN KEY (channel_id, calendar_id) REFERENCES channels (pkid, calendar_id),   -- share a calendar
-    FOREIGN KEY (state_id, state_scope)   REFERENCES workflow_state_usage (state_id, object_type)
+    FOREIGN KEY (workflow_id, workflow_type) REFERENCES workflows (pkid, object_type),
+    FOREIGN KEY (workflow_id, state_id)      REFERENCES workflow_state_usage (workflow_id, state_id)
 );
 
 CREATE TABLE milestones (
@@ -688,11 +750,14 @@ CREATE TABLE video_templates (
     calendar_id  UUID NOT NULL REFERENCES calendars(pkid),
     name         TEXT NOT NULL,              -- 'Weekly episode', 'Product review short'
     format_id    UUID NOT NULL REFERENCES video_formats(pkid),
+    workflow_id  UUID NOT NULL REFERENCES workflows(pkid),   -- e.g. 'Short' for a Shorts template
+    workflow_type object_type NOT NULL DEFAULT 'video' CHECK (workflow_type = 'video'),
     brief        TEXT,
     script       TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at  TIMESTAMPTZ,
-    UNIQUE (pkid, calendar_id)
+    UNIQUE (pkid, calendar_id),
+    FOREIGN KEY (workflow_id, workflow_type) REFERENCES workflows (pkid, object_type)
 );
 CREATE UNIQUE INDEX ON video_templates (calendar_id, lower(name)) WHERE archived_at IS NULL;
 
@@ -816,7 +881,7 @@ BEGIN
                              'calendars', 'channels', 'calendar_grants', 'channel_grants',
                              'series', 'videos', 'segments', 'assets', 'video_assets',
                              'segment_assets', 'publications', 'milestones',
-                             'workflow_transitions', 'video_templates', 'segment_templates',
+                             'workflows', 'workflow_transitions', 'video_templates', 'segment_templates',
                              'video_template_segments', 'video_template_assets',
                              'segment_template_assets', 'milestone_templates',
                              'publication_templates', 'series_templates'] LOOP
@@ -826,21 +891,33 @@ BEGIN
 END $$;
 
 -- ===== Workflow steps follow the table =====
--- A foreign key cannot compare a row's old and new state, so this is the third trigger.
--- A new row must start in its type's initial state; a change must be an active step in
--- workflow_transitions. The app shows only those steps as buttons, so normally this never fires.
+-- A foreign key cannot compare a row's old and new values, so this is the third trigger.
+-- A new item must use a published, current workflow and start in its first state; a state change
+-- must be a step listed in that workflow version; moving an item to another workflow or version
+-- keeps its state (the composite key already makes sure that state exists there).
 CREATE FUNCTION check_workflow_step() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        IF NOT EXISTS (SELECT 1 FROM workflow_state_usage
-                        WHERE object_type = NEW.state_scope AND state_id = NEW.state_id AND is_initial) THEN
-            RAISE EXCEPTION 'a new % must start in its initial state', NEW.state_scope;
+        IF NOT EXISTS (SELECT 1 FROM workflows w
+                         JOIN workflow_state_usage u ON u.workflow_id = w.pkid
+                        WHERE w.pkid = NEW.workflow_id AND w.published_at IS NOT NULL
+                          AND w.archived_at IS NULL AND u.state_id = NEW.state_id AND u.is_initial) THEN
+            RAISE EXCEPTION 'a new row in % must use a published workflow and start in its first state',
+                TG_TABLE_NAME;
+        END IF;
+    ELSIF NEW.workflow_id IS DISTINCT FROM OLD.workflow_id THEN
+        IF NEW.state_id IS DISTINCT FROM OLD.state_id
+           OR NOT EXISTS (SELECT 1 FROM workflows WHERE pkid = NEW.workflow_id
+                             AND published_at IS NOT NULL AND archived_at IS NULL) THEN
+            RAISE EXCEPTION 'a row in % can only move to a published workflow, keeping its state',
+                TG_TABLE_NAME;
         END IF;
     ELSIF NEW.state_id IS DISTINCT FROM OLD.state_id THEN
         IF NOT EXISTS (SELECT 1 FROM workflow_transitions
-                        WHERE object_type = NEW.state_scope AND from_state_id = OLD.state_id
-                          AND to_state_id = NEW.state_id AND is_active) THEN
-            RAISE EXCEPTION 'that % cannot move from its current state to the one asked for', NEW.state_scope;
+                        WHERE workflow_id = NEW.workflow_id AND from_state_id = OLD.state_id
+                          AND to_state_id = NEW.state_id) THEN
+            RAISE EXCEPTION 'that row in % cannot move from its current state to the one asked for',
+                TG_TABLE_NAME;
         END IF;
     END IF;
     RETURN NEW;
@@ -850,10 +927,37 @@ DO $$
 DECLARE t TEXT;
 BEGIN
     FOREACH t IN ARRAY ARRAY['videos', 'segments', 'assets', 'publications'] LOOP
-        EXECUTE format('CREATE TRIGGER workflow_step BEFORE INSERT OR UPDATE OF state_id ON %I
+        EXECUTE format('CREATE TRIGGER workflow_step BEFORE INSERT OR UPDATE OF workflow_id, state_id ON %I
                         FOR EACH ROW EXECUTE FUNCTION check_workflow_step()', t);
     END LOOP;
 END $$;
+
+-- ===== Published workflow versions are frozen =====
+-- The fourth trigger: no constraint can say 'this row may change only while its parent is a draft'.
+-- A published version keeps its states, steps and deadlines for good; only is_default, description
+-- and archived_at may still change. To change a workflow, copy it into version n + 1.
+CREATE FUNCTION freeze_published_workflow() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'workflows' THEN
+        IF OLD.published_at IS NOT NULL
+           AND (NEW.object_type, NEW.name, NEW.version, NEW.published_at)
+               IS DISTINCT FROM (OLD.object_type, OLD.name, OLD.version, OLD.published_at) THEN
+            RAISE EXCEPTION 'workflow % version % is published; make a new version instead',
+                OLD.name, OLD.version;
+        END IF;
+    ELSIF EXISTS (SELECT 1 FROM workflows WHERE published_at IS NOT NULL
+                     AND (pkid = NEW.workflow_id OR (TG_OP = 'UPDATE' AND pkid = OLD.workflow_id))) THEN
+        RAISE EXCEPTION 'that workflow version is published; make a new version instead';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE TRIGGER frozen BEFORE UPDATE ON workflows
+    FOR EACH ROW EXECUTE FUNCTION freeze_published_workflow();
+CREATE TRIGGER frozen BEFORE INSERT OR UPDATE ON workflow_state_usage
+    FOR EACH ROW EXECUTE FUNCTION freeze_published_workflow();
+CREATE TRIGGER frozen BEFORE INSERT OR UPDATE ON workflow_transitions
+    FOR EACH ROW EXECUTE FUNCTION freeze_published_workflow();
 
 -- ===== Calendar dates, worked out from each video's finish =====
 -- The only stored plan date is videos.finish_at; everything else is computed here, so it
@@ -881,8 +985,8 @@ UNION ALL
 SELECT v.calendar_id, v.pkid, 'stage', nxt.pkid, COALESCE(nxt.label, ws.label),
        v.finish_at - nxt.done_before_finish, NULL::timestamptz
   FROM videos v
-  JOIN workflow_state_usage cur ON cur.state_id = v.state_id AND cur.object_type = 'video'
-  JOIN workflow_state_usage nxt ON nxt.object_type = 'video' AND nxt.sort_order >= cur.sort_order
+  JOIN workflow_state_usage cur ON cur.workflow_id = v.workflow_id AND cur.state_id = v.state_id
+  JOIN workflow_state_usage nxt ON nxt.workflow_id = v.workflow_id AND nxt.sort_order >= cur.sort_order
                                AND nxt.done_before_finish IS NOT NULL
   JOIN workflow_states ws ON ws.pkid = nxt.state_id
  WHERE v.archived_at IS NULL;
@@ -999,7 +1103,7 @@ Every video has one stored plan date, its **finish date** (`finish_at`, T-0): th
 - **What happened stays put.** A milestone's done time and a publication's published time are facts and never move.
 - **Even a pitch has a finish date.** It means "if we make this, when would it need to be done", which also shows how soon a decision is needed.
 
-**Stages have deadlines too.** Each video stage carries a T-minus, such as "Pre-production done 14 days before finish", so the calendar shows when every remaining step of a video is due and flags the ones running late. The deadlines live with the stages in `workflow_state_usage` (first guesses in the seed data), so changing them is an admin setting, not a code change.
+**Stages have deadlines too.** Each video stage carries a T-minus, such as "Pre-production done 14 days before finish", so the calendar shows when every remaining step of a video is due and flags the ones running late. The deadlines belong to the workflow version, so a Short workflow can run on a tighter clock than long-form. The seed data holds first guesses for both, and changing them means publishing a new version, not a code change.
 
 The open edge is fixed appointments, such as a shoot booked with a guest, which should not move when the finish date does. See Q29.
 
@@ -1010,11 +1114,12 @@ A series can have a **cadence**, such as weekly, every two weeks or monthly. Whe
 After that the slots are just rows. Moving one episode's finish date moves only that episode and everything tied to it; the screen also offers "move this and every later episode" for when the whole run slips (guess). Changing the cadence never rewrites existing slots; it only sets the dates of slots added later. A series template can carry a cadence and a default number of slots, so a new season comes with its run already laid out.
 
 ```sql
--- Add $4 slots to series $1, using format $2, the first finishing at $3.
+-- Add $4 slots to series $1, using format $2 and workflow $5 (both from the chosen
+-- video template), the first finishing at $3.
 INSERT INTO videos (calendar_id, series_id, episode_number, working_title,
-                    format_id, state_id, finish_at)
+                    format_id, workflow_id, state_id, finish_at)
 SELECT s.calendar_id, s.pkid, n, 'Episode ' || n, $2,
-       (SELECT state_id FROM workflow_state_usage WHERE object_type = 'video' AND is_initial),
+       $5, (SELECT state_id FROM workflow_state_usage WHERE workflow_id = $5 AND is_initial),
        $3::timestamptz + (n - 1) * s.cadence
   FROM series s, generate_series(1, $4::int) AS n
  WHERE s.pkid = $1 AND s.cadence IS NOT NULL;
@@ -1220,6 +1325,8 @@ These rules come from the data model and will surprise people unless the help pa
 - **Slots are real episodes.** Creating a series with 20 slots creates 20 videos with dates from the cadence. Move any of them when life happens; moving one doesn't move the others unless you choose "this and every later episode".
 - **Every stage has a due time.** Each stage of a video is due a set time before its finish date, so the calendar can warn you early when a video is falling behind.
 
+* **Workflows have versions.** Pick a workflow from the list when you create a video; a template usually picks it for you. Changing a workflow makes a new version. Videos already under way stay on the version they started with unless an admin moves them, and a move never changes their current stage.
+
 ## Open questions
 
 Your answers decide the first migration. Where I had to pick, the draft uses the choice in brackets.
@@ -1262,8 +1369,11 @@ Added after your notes on shared access, auditing and the calendar:
 
 - [ ] **Q28. Editor project files on segments.** Should a segment, and a segment template, hold its Kdenlive project (or another editor's) so a new video opens with its timeline ready? It could be a large text column, or a link to a file kept next to the footage. \[Noted only; segment tables unchanged.\]
 - [ ] **Q29. Fixed appointments.** Some dates should not move when the finish date does, such as a shoot booked with a guest. Should those be a separate kind of milestone pinned to a real date, with a warning when the finish date moves past it? \[Not yet: every milestone counts back from finish.\]
-- [ ] **Q30. One workflow, or several?** The steps now live in a table shared by the whole instance. Do some calendars or series need their own workflow, such as Shorts skipping Review? \[One workflow per type for the whole instance.\]
+- [ ] **Q30. One workflow, or several?** Answered: several. Workflows are named and versioned, and you pick one from a list. The seed data includes a Short workflow for videos.
 - [ ] **Q31. Should a series remember its template?** Answered: the new-series wizard creates the episodes from a template video at creation time, and nothing links them afterwards.
 
-* [ ] **Q32. Stage deadlines per format?** A Short and a long-form video need very different timelines, but the draft has one set of stage deadlines for the whole instance. Should video templates (or formats) carry their own? \[One set for now; per-template deadlines are the next step.\]
+* [ ] **Q32. Stage deadlines per format?** Answered by versioned workflows: deadlines belong to each workflow, so Shorts use a Short workflow with its own clock, and a video template names its workflow.
 * [ ] **Q33. Cadences that one interval can't say.** "Every Tuesday and Thursday" or "first Monday of the month" don't fit a single interval. Do you need those? \[A single interval; for two a week, make two series or move slots by hand.\]
+
+- [ ] **Q34. Who builds and publishes workflows?** \[Admins only; everyone else just picks from the list.\]
+- [ ] **Q35. Workflows per calendar?** Should each calendar see only its own list of workflows, or is one company-wide list enough? \[One company-wide list.\]
