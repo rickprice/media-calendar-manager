@@ -4,7 +4,7 @@ Nov 27, 2026 · @Frederick Price
 
 ## Summary
 
-The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 18 content tables (8 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
+The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 23 content tables (8 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
 
 How to read this draft:
 
@@ -24,12 +24,14 @@ These are the terms the app will use in its screens and its code. The last colum
 | Channel | One destination account on one platform, such as a YouTube channel or a Facebook Page. | `channels` |
 | Platform | The service a channel lives on: YouTube, Facebook, and later others. | `channels.platform` |
 | Series | A named, recurring run of videos with a shared format, such as a weekly show. | `series` |
-| Cadence | How often a series releases, such as weekly or monthly. Used to lay out slots. | `series.cadence` |
+| Cadence | When a series releases: a cycle (a week, two weeks, a month) with one or more release times in it, such as Tuesdays and Thursdays at 10:00. Used to lay out slots. | `series_cadences, cadence_times` |
 | Slot | A planned episode created ahead of time from the cadence, holding its place on the calendar until its idea is filled in. A slot is an ordinary video in the Pitch stage, with a finish date that can be moved. | `videos` |
 | Video | One finished piece of content. An *episode* is a video in a series. Every video belongs to a series; loose one-off videos go in a catch-all series such as "One-offs". | `videos` |
 | Format | The shape of a video: long-form, Short/Reel, or live stream. | `videos.format` |
 | Pitch / brief | A short statement of the idea, audience and angle, written before any work starts. A pitch is not a separate kind of thing: it is a video in its first state, Pitch, and green-lighting it moves the same video on. | `videos.brief` |
 | Milestone | A checkpoint on the way to finishing, set as a time before the video's finish date (T-minus), such as script done 10 days before, shoot day, picture lock. It moves when the finish date moves. | `milestones` |
+| Appointment | Something booked at a fixed time, such as a shoot with a guest or a studio slot. Unlike a milestone it stays put when the finish date moves, but it has a T-minus: how long before the finish it must be over. | `appointments` |
+| Resource / crew | A crew, room, kit or person that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
 | Finish date (T-0) | The moment a video must be finished and ready to publish. Every video has one, even a pitch. Milestones and asset needs count back from it (T-minus) and go-live times count forward (T-plus), so moving it moves the whole plan. | `videos.finish_at` |
 | Template | A reusable starting point. A video template holds format, brief, script, a rundown of library segments, the assets it always uses, milestones timed before finish and publishing defaults per channel. Segment templates (a standard intro, a sponsor read) and series templates work the same way. Saved from an existing item or built by hand; a template can never be published itself. | `video_templates` and its child tables |
 | Workflow | A named, versioned set of stages, deadlines and allowed steps for one type of item, such as Standard or Short. Picked from a list when an item is created. A published version never changes; a change is a new version. | `workflows` |
@@ -96,7 +98,7 @@ These are the terms the app will use in its screens and its code. The last colum
 | --- | --- | --- |
 | Instance | One installation of the app for one company, with its own database. A second company gets its own instance, so a breach or bug cannot cross between them. | settings (name, home time zone) |
 | User | One person's time with the company, from a start date to an optional end date; someone who returns gets a new user. Each user has a time zone, used to show every time on screen. | `users`, `time_zones` |
-| Admin | A user who creates calendars, channels, groups and roles and hands out access. Admins can edit everything. An auditor can read everything, including the full audit log, and change nothing. | `system_roles` |
+| Admin | A user who creates calendars, channels, groups and roles and hands out access. Admins can edit everything. An auditor can read everything, including the full audit log, and change nothing. A workflow editor builds and publishes workflows, and gets no other access from that role. | `system_roles` |
 | Group | A named set of people, such as Editors or Freelance designers. | `groups`, `group_members` |
 | Object type | The kinds of thing access is set for: calendar, channel, series, video, segment, asset, publication, milestone, and audit\_log (who may read a calendar's history). | `object_type` enum |
 | Access level | `none`, `read` or `edit`, in that order. | `access_level` enum |
@@ -147,7 +149,7 @@ A pitch that is turned down moves to **Dropped**, so it stays on record and out 
 
 ## Proposed Postgres schema
 
-Thirty-six tables: eighteen for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Forty-one tables: twenty-three for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
 **Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, and the freeze that stops a published workflow version from changing. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
@@ -167,7 +169,7 @@ A publication joins a video to a channel, so one video can go out on YouTube and
 - A grant gives a group a role either on a whole calendar (`calendar_grants`) or on one channel (`channel_grants`). They are separate tables, so no grant can be unclear about what it covers, and who manages a channel can change without touching the calendar's grants. A channel-only grant covers that channel and its publications (guess, Q12).
 - `effective_access` lists every level a user holds and the period it is valid (`valid`). The question asked is always: does this user hold the needed level here, right now?
 - When a person holds several levels, the highest wins; there is no explicit deny (guess, Q11).
-- Admins have `edit` on everything and manage calendars, channels, groups, roles and grants. Auditors have `read` on everything, including the full audit log, and change nothing. A role with `read` on `audit_log` makes a calendar-only auditor (Q19).
+- Admins have `edit` on everything and manage calendars, channels, groups, roles and grants. Auditors have `read` on everything, including the full audit log, and change nothing. A role with `read` on `audit_log` makes a calendar-only auditor (Q19). Workflow editors build and publish the company's one list of workflows; that role gives no access to content.
 - Postgres 15 or later is needed; the cloud test setup has 16. `btree_gist` provides the no-overlap constraints.
 - States and kinds are lookup tables; the Rust code refers to them by their stable code (loaded once at startup), never by a pkid. Only object\_type and access\_level are Postgres enums, mapped with `#[derive(sqlx::Type)]` (guess). Every primary key is a column named pkid holding a meaningless id generated by the database (a UUID from gen\_random\_uuid(), or an identity number for the audit log), never built from table data. Duplicate records are stopped by UNIQUE and no-overlap constraints instead. This matches the existing `users` table.
 
@@ -477,10 +479,11 @@ DROP INDEX idx_users_email;                           -- email is no longer how 
 -- date while a role still runs later is refused as a whole; the app ends those roles
 -- first, in the same transaction. The access view also intersects every period with
 -- employment, as a second guard.
-CREATE TABLE system_roles (                   -- dated admin and auditor assignments, whole instance
+CREATE TABLE system_roles (                   -- dated company-wide roles: admin, auditor, workflow editor
     pkid       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id    UUID NOT NULL REFERENCES users(pkid),
-    role       TEXT NOT NULL CHECK (role IN ('admin', 'auditor')),
+    role       TEXT NOT NULL CHECK (role IN ('admin', 'auditor', 'workflow_editor')),
+                                            -- workflow_editor: may build and publish workflows
     starts_at  TIMESTAMPTZ NOT NULL,
     ends_at    TIMESTAMPTZ,                 -- NULL = open-ended
     employment TSTZRANGE NOT NULL,          -- copy of the person's employment
@@ -587,14 +590,36 @@ CREATE TABLE series (
     calendar_id  UUID NOT NULL REFERENCES calendars(pkid),
     title        TEXT NOT NULL,
     description  TEXT,
-    cadence      INTERVAL CHECK (cadence > INTERVAL '0'),  -- '7 days', '14 days', '1 month';
-                                       -- NULL = no regular rhythm, e.g. 'One-offs'. Used only when
-                                       -- the app adds slots; each slot is then a video row of its own
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at  TIMESTAMPTZ,
     UNIQUE (pkid, calendar_id)
 );
 CREATE UNIQUE INDEX ON series (calendar_id, lower(title)) WHERE archived_at IS NULL;   -- no twin series
+
+-- A series' rhythm: a cycle (a week, two weeks, a month) and one or more release times inside it,
+-- so 'Tuesdays and Thursdays at 10:00' is a 7-day cycle starting Monday 00:00 with times at
+-- '1 day 10:00' and '3 days 10:00'. A series with no row here has no rhythm (e.g. 'One-offs').
+-- Used only when the app lays out slots; each slot is then an ordinary video row of its own.
+CREATE TABLE series_cadences (
+    pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    series_id    UUID NOT NULL UNIQUE REFERENCES series(pkid),   -- at most one per series
+    cycle        INTERVAL NOT NULL CHECK (cycle > INTERVAL '0'), -- '7 days', '14 days', '1 month'
+    starts_at    TIMESTAMPTZ NOT NULL,     -- start of the first cycle, e.g. a Monday 00:00
+    time_zone_id UUID NOT NULL REFERENCES time_zones(pkid),  -- cycles follow this zone's clock, so
+                                           -- 10:00 stays 10:00 across daylight saving
+    UNIQUE (pkid, cycle)
+);
+
+CREATE TABLE cadence_times (
+    pkid            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cadence_id      UUID NOT NULL REFERENCES series_cadences(pkid),
+    cycle           INTERVAL NOT NULL,     -- copy of the cadence's cycle, kept equal by the key below
+    offset_in_cycle INTERVAL NOT NULL CHECK (offset_in_cycle >= INTERVAL '0'),  -- '1 day 10:00'
+    archived_at     TIMESTAMPTZ,
+    FOREIGN KEY (cadence_id, cycle) REFERENCES series_cadences (pkid, cycle) ON UPDATE CASCADE,
+    CHECK (offset_in_cycle < cycle)        -- every release time falls inside its cycle
+);
+CREATE UNIQUE INDEX ON cadence_times (cadence_id, offset_in_cycle) WHERE archived_at IS NULL;
 
 CREATE TABLE videos (
     pkid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -739,6 +764,57 @@ CREATE TABLE milestones (
 );
 CREATE UNIQUE INDEX ON milestones (video_id, lower(name)) WHERE archived_at IS NULL;
 
+-- Appointments are pinned to real times (a shoot booked with a guest, a studio slot) and do not
+-- move when the finish date does. A separate table from milestones, so neither has a column that
+-- only sometimes applies. Each still has a T-minus: it must be over by finish_at - needed_before
+-- (a shoot needed 10 days before finish, so editing has time). schedule_problems flags any that
+-- end later than that, for example after the finish date moves earlier.
+CREATE TABLE appointments (
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    video_id    UUID NOT NULL REFERENCES videos(pkid),
+    name        TEXT NOT NULL,             -- 'Shoot with guest', 'Studio B'
+    starts_at   TIMESTAMPTZ NOT NULL,
+    ends_at     TIMESTAMPTZ NOT NULL,
+    location    TEXT,                      -- free text; a location can host several shoots at once
+    needed_before INTERVAL NOT NULL DEFAULT INTERVAL '0' CHECK (needed_before >= INTERVAL '0'),
+                                           -- T-minus: must end by videos.finish_at - needed_before
+    done_at     TIMESTAMPTZ,
+    archived_at TIMESTAMPTZ,
+    period      TSTZRANGE GENERATED ALWAYS AS (tstzrange(starts_at, ends_at, '[)')) STORED,
+    is_live     BOOLEAN   GENERATED ALWAYS AS (archived_at IS NULL) STORED,
+    CHECK (ends_at > starts_at),
+    UNIQUE (pkid, period, is_live)         -- copied onto each booking below
+);
+
+-- Crews, rooms, kit and people that can only be in one time slot at a time. A crew may work at
+-- several locations and a location may host several shoots; only overlapping times clash.
+-- Company-wide, because a crew can work for several calendars.
+CREATE TABLE resources (
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,             -- 'Crew A', 'Studio 2', 'Drone kit'
+    notes       TEXT,
+    archived_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON resources (lower(name)) WHERE archived_at IS NULL;
+
+-- Which resources an appointment books. Each booking carries a copy of its appointment's time
+-- and live flag (kept equal by the composite key, ON UPDATE CASCADE), so one exclusion constraint
+-- refuses any resource booked twice at overlapping times: moving or reviving an appointment into
+-- a clash is refused too. Archiving the appointment or the booking frees the resource.
+CREATE TABLE appointment_resources (
+    pkid             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    appointment_id   UUID NOT NULL REFERENCES appointments(pkid),
+    resource_id      UUID NOT NULL REFERENCES resources(pkid),
+    period           TSTZRANGE NOT NULL,
+    appointment_live BOOLEAN NOT NULL,
+    archived_at      TIMESTAMPTZ,
+    FOREIGN KEY (appointment_id, period, appointment_live)
+        REFERENCES appointments (pkid, period, is_live) ON UPDATE CASCADE,
+    EXCLUDE USING gist (resource_id WITH =, period WITH &&)
+        WHERE (appointment_live AND archived_at IS NULL)     -- one time slot at a time
+);
+CREATE UNIQUE INDEX ON appointment_resources (appointment_id, resource_id) WHERE archived_at IS NULL;
+
 -- ===== Templates =====
 -- A template is a starting point, not real work: it has no workflow state, no publications and
 -- no dates, only offsets, so it can never be scheduled or published by mistake. Separate tables
@@ -846,15 +922,14 @@ CREATE TABLE publication_templates (
 );
 CREATE UNIQUE INDEX ON publication_templates (video_template_id, channel_id) WHERE archived_at IS NULL;
 
--- A series template starts a new series (a new show or season) with its description, cadence,
--- how many slots to create, and the video template its episodes start from.
+-- A series template starts a new series (a new show or season) with its description, how many
+-- slots to create, and the video template its episodes start from. The wizard asks for the cadence.
 CREATE TABLE series_templates (
     pkid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     calendar_id       UUID NOT NULL REFERENCES calendars(pkid),
     name              TEXT NOT NULL,
     description       TEXT,
     video_template_id UUID NOT NULL REFERENCES video_templates(pkid),
-    cadence           INTERVAL CHECK (cadence > INTERVAL '0'),
     default_slots     INT CHECK (default_slots BETWEEN 1 AND 500),  -- e.g. 10, 20 or 30 episodes
     archived_at       TIMESTAMPTZ,
     FOREIGN KEY (video_template_id, calendar_id) REFERENCES video_templates (pkid, calendar_id)
@@ -881,6 +956,8 @@ BEGIN
                              'calendars', 'channels', 'calendar_grants', 'channel_grants',
                              'series', 'videos', 'segments', 'assets', 'video_assets',
                              'segment_assets', 'publications', 'milestones',
+                             'series_cadences', 'cadence_times', 'appointments', 'resources',
+                             'appointment_resources',
                              'workflows', 'workflow_transitions', 'video_templates', 'segment_templates',
                              'video_template_segments', 'video_template_assets',
                              'segment_template_assets', 'milestone_templates',
@@ -989,7 +1066,48 @@ SELECT v.calendar_id, v.pkid, 'stage', nxt.pkid, COALESCE(nxt.label, ws.label),
   JOIN workflow_state_usage nxt ON nxt.workflow_id = v.workflow_id AND nxt.sort_order >= cur.sort_order
                                AND nxt.done_before_finish IS NOT NULL
   JOIN workflow_states ws ON ws.pkid = nxt.state_id
- WHERE v.archived_at IS NULL;
+ WHERE v.archived_at IS NULL
+UNION ALL
+SELECT v.calendar_id, a.video_id, 'appointment', a.pkid, a.name, a.starts_at, a.done_at
+  FROM appointments a JOIN videos v ON v.pkid = a.video_id
+ WHERE a.archived_at IS NULL AND v.archived_at IS NULL;
+
+-- ===== Schedule problems: the conflicts report =====
+-- Things a person should look at: a pinned appointment that ends later than its T-minus allows
+-- (needed_before, so it also catches one left after the finish), an overdue milestone, a video
+-- still in a stage whose deadline has passed, and an asset that is not ready by the time a video
+-- needs it. A resource booked twice cannot happen (see appointment_resources), so it never
+-- shows here.
+CREATE VIEW schedule_problems AS
+SELECT v.calendar_id, v.pkid AS video_id, 'appointment_too_late'::text AS problem,
+       a.pkid AS item_id, a.name AS label, v.finish_at - a.needed_before AS at
+  FROM appointments a JOIN videos v ON v.pkid = a.video_id
+ WHERE a.archived_at IS NULL AND v.archived_at IS NULL AND a.done_at IS NULL
+   AND a.ends_at > v.finish_at - a.needed_before          -- misses its T-minus
+UNION ALL
+SELECT e.calendar_id, e.video_id, 'milestone_overdue', e.item_id, e.label, e.due_at
+  FROM calendar_entries e
+ WHERE e.kind = 'milestone' AND e.done_at IS NULL AND e.due_at < now()
+UNION ALL
+SELECT v.calendar_id, v.pkid, 'stage_overdue', cur.pkid, COALESCE(cur.label, ws.label),
+       v.finish_at - cur.done_before_finish
+  FROM videos v
+  JOIN workflow_state_usage cur ON cur.workflow_id = v.workflow_id AND cur.state_id = v.state_id
+  JOIN workflow_states ws ON ws.pkid = cur.state_id
+ WHERE v.archived_at IS NULL AND v.finish_at - cur.done_before_finish < now()
+UNION ALL
+SELECT v.calendar_id, v.pkid, 'asset_late', a.pkid, a.name, v.finish_at - u.needed_before
+  FROM (SELECT video_id, asset_id, needed_before FROM video_assets WHERE archived_at IS NULL
+        UNION ALL
+        SELECT s.video_id, sa.asset_id, sa.needed_before
+          FROM segment_assets sa JOIN segments s ON s.pkid = sa.segment_id
+         WHERE sa.archived_at IS NULL AND s.archived_at IS NULL) u
+  JOIN videos v ON v.pkid = u.video_id
+  JOIN assets a ON a.pkid = u.asset_id
+  JOIN workflow_states ws ON ws.pkid = a.state_id
+ WHERE v.archived_at IS NULL AND a.archived_at IS NULL
+   AND ws.code NOT IN ('ready', 'approved', 'not_needed')
+   AND v.finish_at - u.needed_before < now();
 
 -- ===== Effective access, with the days each row is valid =====
 -- valid = the overlap of the user's employment, the membership or role, and the grant.
@@ -1004,6 +1122,7 @@ SELECT sr.user_id, cal.pkid AS calendar_id, NULL::uuid AS channel_id, t.object_t
   JOIN users u              ON u.pkid = sr.user_id
   JOIN calendars cal        ON cal.archived_at IS NULL     -- admins and auditors: every calendar
   CROSS JOIN unnest(enum_range(NULL::object_type)) AS t(object_type)
+ WHERE sr.role IN ('admin', 'auditor')        -- a workflow editor gets no content access from this
 UNION ALL
 SELECT gm.user_id, g.calendar_id, NULL::uuid, rp.object_type, rp.level,
        tstzrange(gm.starts_at, gm.ends_at, '[)')
@@ -1048,6 +1167,8 @@ CREATE INDEX ON segment_assets    (asset_id);
 CREATE INDEX ON publications      (channel_id, state_id)      WHERE archived_at IS NULL;
 CREATE INDEX ON publications      (video_id);
 CREATE INDEX ON milestones        (video_id)                  WHERE archived_at IS NULL;
+CREATE INDEX ON appointments      (video_id)                  WHERE archived_at IS NULL;
+CREATE INDEX ON appointment_resources (resource_id);
 ```
 
 A typical read, listing the videos the logged-in user may see on the calendar:
@@ -1105,27 +1226,51 @@ Every video has one stored plan date, its **finish date** (`finish_at`, T-0): th
 
 **Stages have deadlines too.** Each video stage carries a T-minus, such as "Pre-production done 14 days before finish", so the calendar shows when every remaining step of a video is due and flags the ones running late. The deadlines belong to the workflow version, so a Short workflow can run on a tighter clock than long-form. The seed data holds first guesses for both, and changing them means publishing a new version, not a code change.
 
-The open edge is fixed appointments, such as a shoot booked with a guest, which should not move when the finish date does. See Q29.
+Fixed appointments, such as a shoot booked with a guest, are the exception: they stay pinned to their real time (see Appointments, crews and problems below).
 
 ### Series cadence and slots
 
-A series can have a **cadence**, such as weekly, every two weeks or monthly. When you create a series, or later, you ask for a number of **slots**, say 10, 20 or 30, and the app creates that many videos straight away: "Episode 1", "Episode 2" and so on, each in the Pitch stage with its finish date one cadence after the last. A slot is not a new kind of thing. It is an ordinary video, so it has a finish date from the start, its stages and milestones count back from it, and it shows on the calendar at once.
+A series can have a **cadence**: a cycle, such as a week, two weeks or a month, with one or more release times in it. "Weekly on Tuesday at 10:00" is one time in a 7-day cycle, "Tuesdays and Thursdays at 10:00" is two, and "every other Friday" is one time in a 14-day cycle. The cadence keeps its own time zone, so 10:00 stays 10:00 when the clocks change. When you create a series, or later, you ask for a number of **slots**, say 10, 20 or 30, and the app creates that many videos straight away: "Episode 1", "Episode 2" and so on, each in the Pitch stage with its finish date at the next release time. A slot is not a new kind of thing. It is an ordinary video, so it has a finish date from the start, its stages and milestones count back from it, and it shows on the calendar at once.
 
-After that the slots are just rows. Moving one episode's finish date moves only that episode and everything tied to it; the screen also offers "move this and every later episode" for when the whole run slips (guess). Changing the cadence never rewrites existing slots; it only sets the dates of slots added later. A series template can carry a cadence and a default number of slots, so a new season comes with its run already laid out.
+After that the slots are just rows. Moving one episode's finish date moves only that episode and everything tied to it; the screen also offers "move this and every later episode" for when the whole run slips (guess). Changing the cadence never rewrites existing slots; it only sets the dates of slots added later. A series template carries a default number of slots; the wizard asks for the cadence.
 
 ```sql
--- Add $4 slots to series $1, using format $2 and workflow $5 (both from the chosen
--- video template), the first finishing at $3.
+-- Run in the wizard's transaction after SET LOCAL TimeZone to the cadence's zone, so adding
+-- days keeps the local clock time. Adds $4 slots to series $1, using format $2 and workflow $5
+-- (both from the chosen video template), at the first release times on or after $3.
 INSERT INTO videos (calendar_id, series_id, episode_number, working_title,
                     format_id, workflow_id, state_id, finish_at)
-SELECT s.calendar_id, s.pkid, n, 'Episode ' || n, $2,
-       $5, (SELECT state_id FROM workflow_state_usage WHERE workflow_id = $5 AND is_initial),
-       $3::timestamptz + (n - 1) * s.cadence
-  FROM series s, generate_series(1, $4::int) AS n
- WHERE s.pkid = $1 AND s.cadence IS NOT NULL;
+SELECT s.calendar_id, s.pkid, x.n, 'Episode ' || x.n, $2, $5,
+       (SELECT state_id FROM workflow_state_usage WHERE workflow_id = $5 AND is_initial),
+       x.finish_at
+  FROM series s
+  CROSS JOIN LATERAL (
+      SELECT f.finish_at,
+             COALESCE((SELECT max(episode_number) FROM videos WHERE series_id = s.pkid), 0)
+               + row_number() OVER (ORDER BY f.finish_at) AS n
+        FROM (SELECT c.starts_at + k * c.cycle + t.offset_in_cycle AS finish_at
+                FROM series_cadences c
+                JOIN cadence_times t ON t.cadence_id = c.pkid AND t.archived_at IS NULL
+                CROSS JOIN LATERAL (SELECT greatest(0, floor(extract(epoch FROM $3 - c.starts_at)
+                                       / extract(epoch FROM c.cycle))::int - 1) AS k0) z
+                CROSS JOIN LATERAL generate_series(z.k0, z.k0 + $4 + 1) AS k
+               WHERE c.series_id = s.pkid) f
+       WHERE f.finish_at >= $3
+       ORDER BY f.finish_at
+       LIMIT $4) x
+ WHERE s.pkid = $1;
 ```
 
 New series are made with a wizard: pick a series template or start blank, name the series, choose the video template its episodes start from, set the cadence, the first finish date and the number of slots, then review the laid-out dates and confirm. On confirm, one transaction creates the series and every slot video, copying each slot's segments, asset links, milestones and publications from the chosen video template. That copy happens once, at creation; later edits to the template do not change the episodes, and more slots added later go through the same step.
+
+### Appointments, crews and problems
+
+Some things happen at a fixed time and must not move with the finish date: a shoot booked with a guest, a studio slot, an interview. These are **appointments**, kept apart from milestones. An appointment has a real start and end and stays put, while a milestone counts back from the finish.
+
+- **Appointments still have a T-minus.** Each one says how long before the finish it must be over (`needed_before`), such as a shoot that must wrap 10 days before finish so editing has time. The appointment doesn't move, but its deadline does, so a finish date moved earlier can leave it too late.
+- **Resources can't be in two time slots at once.** A **resource** is a crew, studio, drone kit or presenter. An appointment books the resources it needs, and the database refuses any booking whose time overlaps another booking of the same resource. That covers moving an appointment into a clash and bringing back an archived one, so a double booking cannot exist. Locations don't clash: a crew can work at several locations in a day, and a location can host several shoots, even at once.
+- **Resources are company-wide,** because a crew can work for several calendars.
+- **The problems report** (`schedule_problems`) lists what needs a person's attention: an appointment that ends later than its T-minus allows (including one now after the finish), an overdue milestone, a video still in a stage whose deadline has passed, and an asset that isn't ready when a video needs it. Each row points to its video, so someone can move the appointment, the finish date, or both.
 
 ### Templates
 
@@ -1282,7 +1427,8 @@ Rule 4 in the repo's CLAUDE.md says every query must filter by `user_id`. Shared
    `effective_access` for that object type on its calendar or channel: `read` to view,
    `edit` to create, change or delete. Never take a user, calendar or channel
    id from the request as proof of access. Admin-only actions (calendars, channels, groups,
-   roles, grants) need a current admin assignment. Reading the audit log needs admin,
+   roles, grants) need a current admin assignment; building or publishing workflows needs a
+   current admin or workflow_editor assignment. Reading the audit log needs admin,
    auditor, or `read` on `audit_log` for that calendar. Auditors never get `edit`.
    "Current" always means valid at now(). Store every date and time as TIMESTAMPTZ
    (UTC), never DATE, and show it in the viewer's own time zone.
@@ -1325,7 +1471,10 @@ These rules come from the data model and will surprise people unless the help pa
 - **Slots are real episodes.** Creating a series with 20 slots creates 20 videos with dates from the cadence. Move any of them when life happens; moving one doesn't move the others unless you choose "this and every later episode".
 - **Every stage has a due time.** Each stage of a video is due a set time before its finish date, so the calendar can warn you early when a video is falling behind.
 
-* **Workflows have versions.** Pick a workflow from the list when you create a video; a template usually picks it for you. Changing a workflow makes a new version. Videos already under way stay on the version they started with unless an admin moves them, and a move never changes their current stage.
+* **Appointments stay put.** A booked shoot or studio slot keeps its time when the finish date moves. Give it a T-minus (for example, wrap 10 days before finish); if it ends later than that, it shows on the problems report.
+* **A crew can't be in two time slots at once.** Booking a crew, studio or kit that is already booked at an overlapping time is refused. Archive the other booking first, or pick another time. Two shoots at the same location are fine.
+
+- **Workflows have versions.** Pick a workflow from the list when you create a video; a template usually picks it for you. Changing a workflow makes a new version. Videos already under way stay on the version they started with unless an admin moves them, and a move never changes their current stage.
 
 ## Open questions
 
@@ -1368,12 +1517,15 @@ Added after your notes on shared access, auditing and the calendar:
 * [ ] **Q27. What else needs templates?** Answered: videos, segments, series and publishing defaults. All four are in the draft.
 
 - [ ] **Q28. Editor project files on segments.** Should a segment, and a segment template, hold its Kdenlive project (or another editor's) so a new video opens with its timeline ready? It could be a large text column, or a link to a file kept next to the footage. \[Noted only; segment tables unchanged.\]
-- [ ] **Q29. Fixed appointments.** Some dates should not move when the finish date does, such as a shoot booked with a guest. Should those be a separate kind of milestone pinned to a real date, with a warning when the finish date moves past it? \[Not yet: every milestone counts back from finish.\]
+- [ ] **Q29. Fixed appointments.** Answered: appointments stay pinned but carry a T-minus, the problems report flags any that end later than it allows, and crews and other resources can never be in two overlapping time slots.
 - [ ] **Q30. One workflow, or several?** Answered: several. Workflows are named and versioned, and you pick one from a list. The seed data includes a Short workflow for videos.
 - [ ] **Q31. Should a series remember its template?** Answered: the new-series wizard creates the episodes from a template video at creation time, and nothing links them afterwards.
 
 * [ ] **Q32. Stage deadlines per format?** Answered by versioned workflows: deadlines belong to each workflow, so Shorts use a Short workflow with its own clock, and a video template names its workflow.
-* [ ] **Q33. Cadences that one interval can't say.** "Every Tuesday and Thursday" or "first Monday of the month" don't fit a single interval. Do you need those? \[A single interval; for two a week, make two series or move slots by hand.\]
+* [ ] **Q33. Cadences that one interval can't say.** Answered: yes. A cadence is a cycle with any number of release times, so Tuesdays and Thursdays is one cadence. "First Monday of the month" still doesn't fit; move those slots by hand.
 
-- [ ] **Q34. Who builds and publishes workflows?** \[Admins only; everyone else just picks from the list.\]
-- [ ] **Q35. Workflows per calendar?** Should each calendar see only its own list of workflows, or is one company-wide list enough? \[One company-wide list.\]
+- [ ] **Q34. Who builds and publishes workflows?** Answered: a role. Admins can give people the workflow editor role; everyone else picks from the list.
+- [ ] **Q35. Workflows per calendar?** Answered: one list for the whole company.
+
+* [ ] **Q36. Who manages crews and resources?** \[Admins, like the workflow list; it could become its own role.\]
+* [ ] **Q37. Warn ahead, and tell people?** The problems report shows what is already wrong. Should it also warn a few days ahead, and should it email the people involved? \[Report only, for now.\]
