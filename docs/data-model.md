@@ -33,7 +33,7 @@ These are the terms the app will use in its screens and its code. The last colum
 | Appointment | Something booked at a fixed time, such as a shoot with a guest or a studio slot. Unlike a milestone it stays put when the finish date moves, but it has a T-minus: how long before the finish it must be over. | `appointments` |
 | Resource | A studio or room that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
 | Crew | A named team of users, such as Crew A. Booking a crew books each person on it, so people see their own appointments (a crew lead sees the whole crew's), and nobody can be in two overlapping time slots even if they are on two crews. | `crews, crew_members, appointment_people` |
-| Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. Each item moves through a workflow: Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair. | `equipment_models, equipment_items, equipment_issues` |
+| Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. Each item moves through a workflow: Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair, Missing. | `equipment_models, equipment_items, equipment_issues` |
 | Package template | A kit list for a kind of job, such as Interview kit: models and how many, never serial numbers. Video templates can bring kits along. The same gear can be packed by many templates. | `package_templates, package_template_items` |
 | Package | One crate packed for one appointment: what it needs (copied from a template) and the tagged items actually in it. Ticked off on screen as it is packed, and prints as a checklist. An item can't be in two packages at overlapping times. | `packages, package_needs, package_items` |
 | Kit | A real, persistent crate (Interview kit A) that keeps its gear between jobs and names the kit list it should hold. An item is in one kit at a time. Booking a kit packs its current items for an appointment. | `kits, kit_items, kit_bookings` |
@@ -315,7 +315,7 @@ INSERT INTO workflow_states (code, label, sort_order) VALUES
     ('removed', 'Removed', 130),
     ('in_use', 'Out on a job', 140),      ('needs_cleaning', 'Needs cleaning', 150),
     ('needs_restock', 'Needs restocking', 160), ('damaged', 'Damaged', 170),
-    ('in_repair', 'Out for repair', 180);
+    ('in_repair', 'Out for repair', 180), ('missing', 'Missing', 190);
 
 -- Version 1 of a 'Standard' workflow for each type, and a 'Short' one for videos with tighter
 -- deadlines. Created as drafts, filled in, then published.
@@ -355,7 +355,8 @@ SELECT w.pkid, s.pkid, u.label, u.sort_order, u.is_initial
     ('needs_cleaning',  'equipment',   NULL,        30, FALSE),
     ('needs_restock',   'equipment',   NULL,        40, FALSE),
     ('damaged',         'equipment',   NULL,        50, FALSE),
-    ('in_repair',       'equipment',   NULL,        60, FALSE)
+    ('in_repair',       'equipment',   NULL,        60, FALSE),
+    ('missing',         'equipment',   NULL,        70, FALSE)
   ) AS u(code, object_type, label, sort_order, is_initial)
   JOIN workflow_states s ON s.code = u.code
   JOIN workflows w ON w.object_type = u.object_type::object_type AND w.name = 'Standard';
@@ -408,7 +409,10 @@ SELECT w.pkid, f.pkid, d.pkid, t.label, t.sort_order
     ('equipment', 'needs_restock', 'damaged', 'Report damage', 110),
     ('equipment', 'damaged', 'in_repair', 'Send for repair', 120),
     ('equipment', 'damaged', 'ready', 'Fine after all', 130),
-    ('equipment', 'in_repair', 'ready', 'Back from repair', 140)
+    ('equipment', 'in_repair', 'ready', 'Back from repair', 140),
+    ('equipment', 'in_use', 'missing', 'Not returned', 150),
+    ('equipment', 'missing', 'ready', 'Found', 160),
+    ('equipment', 'missing', 'damaged', 'Found damaged', 170)
   ) AS t(object_type, from_code, to_code, label, sort_order)
   JOIN workflow_states f ON f.code = t.from_code
   JOIN workflow_states d ON d.code = t.to_code
@@ -992,10 +996,14 @@ CREATE TABLE package_items (
     item_id      UUID NOT NULL REFERENCES equipment_items(pkid),
     period       TSTZRANGE NOT NULL,
     package_live BOOLEAN NOT NULL,
-    packed_at    TIMESTAMPTZ,               -- ticked on the checklist, on screen as it is packed;
-                                            -- who ticked it is in the audit log
-    returned_at  TIMESTAMPTZ,               -- back in stock after the job
+    packed_at    TIMESTAMPTZ,               -- ticked on the checklist as it goes in the crate
+    checked_out_at TIMESTAMPTZ,             -- scanned out when the crate leaves for the shoot
+    checked_in_at  TIMESTAMPTZ,             -- scanned back in after it; who did each is in the
+                                            -- audit log. Not back = 'Missing' and on the report
     archived_at  TIMESTAMPTZ,
+    CHECK (checked_out_at IS NULL OR packed_at IS NOT NULL),      -- packed before it leaves
+    CHECK (checked_in_at IS NULL OR checked_in_at >= checked_out_at), -- in only after out
+    CHECK (checked_in_at IS NULL OR checked_out_at IS NOT NULL),
     FOREIGN KEY (package_id, period, package_live)
         REFERENCES packages (pkid, period, is_live) ON UPDATE CASCADE,
     EXCLUDE USING gist (item_id WITH =, period WITH &&)
@@ -1344,8 +1352,10 @@ SELECT v.calendar_id, a.video_id, 'appointment', a.pkid, a.name, a.starts_at, a.
 -- still in a stage whose deadline has passed, and an asset that is not ready by the time a video
 -- needs it. For appointments still to come: a package holding fewer of a model than it needs,
 -- packed gear with an open wear or damage report, and packed gear that is no longer Ready
--- (damaged, out for repair, waiting to be cleaned or restocked). A person, room or piece of gear booked
--- twice cannot happen (see the exclusion constraints), so it never shows here.
+-- (damaged, out for repair, waiting to be cleaned or restocked). Once a shoot has started, gear
+-- not yet checked out; once it has ended, gear checked out but not checked back in. A person,
+-- room or piece of gear booked twice cannot happen (see the exclusion constraints), so it
+-- never shows here.
 CREATE VIEW schedule_problems AS
 SELECT v.calendar_id, v.pkid AS video_id, 'appointment_too_late'::text AS problem,
        a.pkid AS item_id, a.name AS label, v.finish_at - a.needed_before AS at
@@ -1410,7 +1420,21 @@ SELECT v.calendar_id, v.pkid, 'gear_not_ready', i.pkid,
   JOIN packages p         ON p.pkid = pi.package_id AND p.archived_at IS NULL
   JOIN appointments a     ON a.pkid = p.appointment_id AND a.archived_at IS NULL
   JOIN videos v           ON v.pkid = a.video_id AND v.archived_at IS NULL
- WHERE pi.archived_at IS NULL AND a.starts_at > now() AND ws.code NOT IN ('ready', 'in_use');
+ WHERE pi.archived_at IS NULL AND a.starts_at > now() AND ws.code NOT IN ('ready', 'in_use')
+UNION ALL
+SELECT v.calendar_id, v.pkid,
+       CASE WHEN pi.checked_out_at IS NULL THEN 'gear_not_checked_out' ELSE 'gear_not_returned' END,
+       i.pkid, m.name || ' #' || i.asset_tag || ': ' || a.name,
+       CASE WHEN pi.checked_out_at IS NULL THEN a.starts_at ELSE a.ends_at END
+  FROM package_items pi
+  JOIN equipment_items i  ON i.pkid = pi.item_id
+  JOIN equipment_models m ON m.pkid = i.model_id
+  JOIN packages p         ON p.pkid = pi.package_id AND p.archived_at IS NULL
+  JOIN appointments a     ON a.pkid = p.appointment_id AND a.archived_at IS NULL
+  JOIN videos v           ON v.pkid = a.video_id AND v.archived_at IS NULL
+ WHERE pi.archived_at IS NULL AND pi.checked_in_at IS NULL
+   AND ((pi.checked_out_at IS NULL AND a.starts_at <= now() AND a.done_at IS NULL)
+     OR (pi.checked_out_at IS NOT NULL AND a.ends_at < now()));
 
 -- ===== Effective access, with the days each row is valid =====
 -- valid = the overlap of the user's employment, the membership or role, and the grant.
@@ -1630,9 +1654,11 @@ Gear is tracked piece by piece, because there may be several of the same camera 
 - **Gear can't be in two places at once.** An item can't be in two packages whose appointments overlap in time. Moving an appointment into a clash or bringing back an archived package is refused too. Archiving a package or its appointment unpacks the gear.
 - **History and damage.** Every package an item was in stays on record, so you can see where it went, and wear or damage is logged as an issue on the item. The problems report flags a package that is short of what it needs, and packed gear with an open issue, for appointments still to come.
 
-* **Gear has a workflow.** Each item is Ready, Out on a job, Needs cleaning, Needs restocking (reusables replaced), Damaged, or Out for repair, and moves only along the allowed steps, just like videos. Damage is flagged by moving the item to Damaged and logging what happened as an issue. The gear workflow is versioned and editable like the others.
-* **Only Ready gear can be packed.** The database refuses to pack an item in any other state, so a kit can't be booked while any of its gear is damaged, dirty or out for repair. Gear that breaks after it was packed stays packed and shows on the problems report as not ready.
-* **Kits are persistent.** A **kit** is a real crate, such as Interview kit A, that keeps its gear between jobs. It names the kit list it should hold, and its contents are dated, so an item is in one kit at a time and moving it to another kit is a repack with a history. Booking a kit for an appointment makes a package from it in one step: the kit list becomes the needs and the items in the kit now are packed.
+* **Check out and check in.** Every packed item is scanned out by its asset tag when the crate leaves for the shoot and scanned back in afterwards; the database won't let an item be checked out before it is packed, or checked in before it was checked out, and the audit log records who did each. The problems report flags gear not yet checked out once a shoot has started, and gear checked out but not back once it has ended, naming the shoot, so nothing goes missing without a trace. An item that doesn't come back is moved to Missing.
+
+- **Gear has a workflow.** Each item is Ready, Out on a job, Needs cleaning, Needs restocking (reusables replaced), Damaged, or Out for repair, and moves only along the allowed steps, just like videos. Damage is flagged by moving the item to Damaged and logging what happened as an issue; gear that doesn't come back from a shoot goes to Missing until it is found. The gear workflow is versioned and editable like the others.
+- **Only Ready gear can be packed.** The database refuses to pack an item in any other state, so a kit can't be booked while any of its gear is damaged, dirty or out for repair. Gear that breaks after it was packed stays packed and shows on the problems report as not ready.
+- **Kits are persistent.** A **kit** is a real crate, such as Interview kit A, that keeps its gear between jobs. It names the kit list it should hold, and its contents are dated, so an item is in one kit at a time and moving it to another kit is a repack with a history. Booking a kit for an appointment makes a package from it in one step: the kit list becomes the needs and the items in the kit now are packed.
 
 ```sql
 -- Pack from template: copy package template $2's kit list into new package $1.
@@ -1646,7 +1672,7 @@ SELECT $1, model_id, quantity
 -- Crate checklist for package $1, on screen or printed: each needed model with how many, then
 -- the asset tags packed against it. Gear packed beyond the list shows with needed = 0.
 SELECT m.name AS model, COALESCE(n.quantity, 0) AS needed,
-       i.asset_tag, i.nickname, pi.packed_at
+       i.asset_tag, i.nickname, pi.packed_at, pi.checked_out_at, pi.checked_in_at
   FROM (SELECT model_id, quantity FROM package_needs WHERE package_id = $1 AND archived_at IS NULL) n
   FULL JOIN (SELECT pi.*, i.model_id FROM package_items pi
                JOIN equipment_items i ON i.pkid = pi.item_id
@@ -1680,7 +1706,7 @@ SELECT p.pkid, ki.item_id, p.period, p.is_live
 ```sql
 -- Where has item $1 been? Its packing history, newest first, with each appointment and video.
 SELECT a.starts_at, a.ends_at, a.name AS appointment, a.location, v.working_title,
-       p.name AS package, pi.packed_at, pi.returned_at
+       p.name AS package, pi.checked_out_at, pi.checked_in_at
   FROM package_items pi
   JOIN packages p     ON p.pkid = pi.package_id
   JOIN appointments a ON a.pkid = p.appointment_id
@@ -1901,6 +1927,7 @@ These rules come from the data model and will surprise people unless the help pa
 * **My appointments.** Everyone sees their own bookings, with time and place, on one page. Crew leads also see every booking of their crew.
 * **Ending someone with bookings ahead.** Archive or reassign their future bookings first; the database won't let a booking sit outside someone's employment.
 * **Packing for a shoot.** Pick a package template, adjust the list, then pack items by their asset tags, ticking each one off on screen as it goes in (or print the checklist for the crate). New gear gets its asset tag when it is added; print the label and stick it on. Gear already packed for an overlapping appointment is refused; log any wear or damage on the item.
+* **Check out, check in.** Scan each item's tag as the crate leaves for a shoot and again when it comes back. Anything not back shows on the problems report with the shoot it went to; mark it Missing until it turns up.
 * **Gear states.** After a job, mark each item Back (all good), Needs cleaning or Needs restocking; report damage to move it to Damaged, then Out for repair. Only Ready gear can be packed.
 * **Kits stay packed.** Book a whole kit to a shoot in one step. If anything in it isn't Ready, swap it for a Ready item (a repack) or fix it first.
 
