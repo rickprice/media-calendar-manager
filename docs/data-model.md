@@ -4,7 +4,7 @@ Nov 27, 2026 · @Frederick Price
 
 ## Summary
 
-The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 23 content tables (8 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
+The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 26 content tables (8 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
 
 How to read this draft:
 
@@ -31,7 +31,8 @@ These are the terms the app will use in its screens and its code. The last colum
 | Pitch / brief | A short statement of the idea, audience and angle, written before any work starts. A pitch is not a separate kind of thing: it is a video in its first state, Pitch, and green-lighting it moves the same video on. | `videos.brief` |
 | Milestone | A checkpoint on the way to finishing, set as a time before the video's finish date (T-minus), such as script done 10 days before, shoot day, picture lock. It moves when the finish date moves. | `milestones` |
 | Appointment | Something booked at a fixed time, such as a shoot with a guest or a studio slot. Unlike a milestone it stays put when the finish date moves, but it has a T-minus: how long before the finish it must be over. | `appointments` |
-| Resource / crew | A crew, room, kit or person that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
+| Resource | A studio, room or piece of kit that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
+| Crew | A named team of users, such as Crew A. Booking a crew books each person on it, so people see their own appointments, and nobody can be in two overlapping time slots even if they are on two crews. | `crews, crew_members, appointment_people` |
 | Finish date (T-0) | The moment a video must be finished and ready to publish. Every video has one, even a pitch. Milestones and asset needs count back from it (T-minus) and go-live times count forward (T-plus), so moving it moves the whole plan. | `videos.finish_at` |
 | Template | A reusable starting point. A video template holds format, brief, script, a rundown of library segments, the assets it always uses, milestones timed before finish and publishing defaults per channel. Segment templates (a standard intro, a sponsor read) and series templates work the same way. Saved from an existing item or built by hand; a template can never be published itself. | `video_templates` and its child tables |
 | Workflow | A named, versioned set of stages, deadlines and allowed steps for one type of item, such as Standard or Short. Picked from a list when an item is created. A published version never changes; a change is a new version. | `workflows` |
@@ -149,7 +150,7 @@ A pitch that is turned down moves to **Dropped**, so it stays on record and out 
 
 ## Proposed Postgres schema
 
-Forty-one tables: twenty-three for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Forty-four tables: twenty-six for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
 **Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, and the freeze that stops a published workflow version from changing. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
@@ -786,12 +787,12 @@ CREATE TABLE appointments (
     UNIQUE (pkid, period, is_live)         -- copied onto each booking below
 );
 
--- Crews, rooms, kit and people that can only be in one time slot at a time. A crew may work at
--- several locations and a location may host several shoots; only overlapping times clash.
--- Company-wide, because a crew can work for several calendars.
+-- Rooms and kit that can only be in one time slot at a time (people are booked below, as users).
+-- A location is not a resource: it can host several shoots at once. Company-wide, because a
+-- studio can serve several calendars.
 CREATE TABLE resources (
     pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT NOT NULL,             -- 'Crew A', 'Studio 2', 'Drone kit'
+    name        TEXT NOT NULL,             -- 'Studio 2', 'Drone kit'
     notes       TEXT,
     archived_at TIMESTAMPTZ
 );
@@ -814,6 +815,53 @@ CREATE TABLE appointment_resources (
         WHERE (appointment_live AND archived_at IS NULL)     -- one time slot at a time
 );
 CREATE UNIQUE INDEX ON appointment_resources (appointment_id, resource_id) WHERE archived_at IS NULL;
+
+-- A crew is a named team of users ('Crew A'), company-wide. Membership is dated and sits inside
+-- each person's employment, like group membership. A crew is a shortcut for booking: booking
+-- 'Crew A' books each of its members at that moment, so a person in two crews still can't be
+-- in two overlapping time slots.
+CREATE TABLE crews (
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    archived_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON crews (lower(name)) WHERE archived_at IS NULL;
+
+CREATE TABLE crew_members (                    -- dated: who was on which crew, when
+    pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    crew_id      UUID NOT NULL REFERENCES crews(pkid),
+    user_id      UUID NOT NULL REFERENCES users(pkid),
+    starts_at    TIMESTAMPTZ NOT NULL,
+    ends_at      TIMESTAMPTZ,
+    employment   TSTZRANGE NOT NULL,        -- copy of the person's employment
+    CHECK (ends_at IS NULL OR ends_at > starts_at),
+    FOREIGN KEY (user_id, employment) REFERENCES users (pkid, employment) ON UPDATE CASCADE,
+    CHECK (employment @> tstzrange(starts_at, ends_at, '[)')),  -- inside employment
+    EXCLUDE USING gist (crew_id WITH =, user_id WITH =,
+                        tstzrange(starts_at, ends_at, '[)') WITH &&)
+);
+
+-- Which people an appointment books. Like appointment_resources, each row copies the
+-- appointment's time and live flag, so one exclusion constraint refuses a person in two
+-- overlapping time slots, whichever crews they came through. It also copies the person's
+-- employment, so nobody can be booked outside their employment, and moving the appointment or
+-- shortening the employment past a booking is refused. People see their own bookings from here.
+CREATE TABLE appointment_people (
+    pkid             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    appointment_id   UUID NOT NULL REFERENCES appointments(pkid),
+    user_id          UUID NOT NULL REFERENCES users(pkid),
+    period           TSTZRANGE NOT NULL,
+    appointment_live BOOLEAN NOT NULL,
+    employment       TSTZRANGE NOT NULL,    -- copy of the person's employment
+    archived_at      TIMESTAMPTZ,
+    FOREIGN KEY (appointment_id, period, appointment_live)
+        REFERENCES appointments (pkid, period, is_live) ON UPDATE CASCADE,
+    FOREIGN KEY (user_id, employment) REFERENCES users (pkid, employment) ON UPDATE CASCADE,
+    CHECK (employment @> period),          -- booked only while employed
+    EXCLUDE USING gist (user_id WITH =, period WITH &&)
+        WHERE (appointment_live AND archived_at IS NULL)     -- one time slot at a time
+);
+CREATE UNIQUE INDEX ON appointment_people (appointment_id, user_id) WHERE archived_at IS NULL;
 
 -- ===== Templates =====
 -- A template is a starting point, not real work: it has no workflow state, no publications and
@@ -957,7 +1005,7 @@ BEGIN
                              'series', 'videos', 'segments', 'assets', 'video_assets',
                              'segment_assets', 'publications', 'milestones',
                              'series_cadences', 'cadence_times', 'appointments', 'resources',
-                             'appointment_resources',
+                             'appointment_resources', 'crews', 'crew_members', 'appointment_people',
                              'workflows', 'workflow_transitions', 'video_templates', 'segment_templates',
                              'video_template_segments', 'video_template_assets',
                              'segment_template_assets', 'milestone_templates',
@@ -1076,8 +1124,8 @@ SELECT v.calendar_id, a.video_id, 'appointment', a.pkid, a.name, a.starts_at, a.
 -- Things a person should look at: a pinned appointment that ends later than its T-minus allows
 -- (needed_before, so it also catches one left after the finish), an overdue milestone, a video
 -- still in a stage whose deadline has passed, and an asset that is not ready by the time a video
--- needs it. A resource booked twice cannot happen (see appointment_resources), so it never
--- shows here.
+-- needs it. A person or resource booked twice cannot happen (see appointment_people and
+-- appointment_resources), so it never shows here.
 CREATE VIEW schedule_problems AS
 SELECT v.calendar_id, v.pkid AS video_id, 'appointment_too_late'::text AS problem,
        a.pkid AS item_id, a.name AS label, v.finish_at - a.needed_before AS at
@@ -1169,6 +1217,7 @@ CREATE INDEX ON publications      (video_id);
 CREATE INDEX ON milestones        (video_id)                  WHERE archived_at IS NULL;
 CREATE INDEX ON appointments      (video_id)                  WHERE archived_at IS NULL;
 CREATE INDEX ON appointment_resources (resource_id);
+CREATE INDEX ON crew_members (user_id);
 ```
 
 A typical read, listing the videos the logged-in user may see on the calendar:
@@ -1268,9 +1317,35 @@ New series are made with a wizard: pick a series template or start blank, name t
 Some things happen at a fixed time and must not move with the finish date: a shoot booked with a guest, a studio slot, an interview. These are **appointments**, kept apart from milestones. An appointment has a real start and end and stays put, while a milestone counts back from the finish.
 
 - **Appointments still have a T-minus.** Each one says how long before the finish it must be over (`needed_before`), such as a shoot that must wrap 10 days before finish so editing has time. The appointment doesn't move, but its deadline does, so a finish date moved earlier can leave it too late.
-- **Resources can't be in two time slots at once.** A **resource** is a crew, studio, drone kit or presenter. An appointment books the resources it needs, and the database refuses any booking whose time overlaps another booking of the same resource. That covers moving an appointment into a clash and bringing back an archived one, so a double booking cannot exist. Locations don't clash: a crew can work at several locations in a day, and a location can host several shoots, even at once.
-- **Resources are company-wide,** because a crew can work for several calendars.
+- **Crews are made of people, and people are users.** A **crew** (Crew A) is a named team; membership is dated and stays inside each person's employment, like group membership. Booking a crew onto an appointment books each person on it at that moment, so everyone can see and report on their own appointments.
+- **Nobody can be in two time slots at once.** The database refuses any booking of a person whose time overlaps another of their bookings, even when they are on two crews. That covers moving an appointment into a clash and bringing back an archived one. A person also can't be booked outside their employment, so ending someone with bookings still ahead is refused until those bookings are archived.
+- **Studios and kit are resources,** booked the same way and with the same rule. Locations don't clash: a crew can work at several locations in a day, and a location can host several shoots, even at once. Crews and resources are company-wide, because they can work for several calendars.
 - **The problems report** (`schedule_problems`) lists what needs a person's attention: an appointment that ends later than its T-minus allows (including one now after the finish), an overdue milestone, a video still in a stage whose deadline has passed, and an asset that isn't ready when a video needs it. Each row points to its video, so someone can move the appointment, the finish date, or both.
+
+```sql
+-- Book crew $2 onto appointment $1: everyone on the crew when the appointment starts.
+-- The exclusion constraint refuses the whole insert if any member is already booked then.
+INSERT INTO appointment_people (appointment_id, user_id, period, appointment_live, employment)
+SELECT a.pkid, u.pkid, a.period, a.is_live, u.employment
+  FROM appointments a
+  JOIN crew_members cm ON cm.crew_id = $2
+                      AND tstzrange(cm.starts_at, cm.ends_at, '[)') @> a.starts_at
+  JOIN users u ON u.pkid = cm.user_id
+ WHERE a.pkid = $1
+ON CONFLICT (appointment_id, user_id) WHERE archived_at IS NULL DO NOTHING;
+-- (skips only people already on this appointment; a clash elsewhere still fails the insert)
+```
+
+```sql
+-- My appointments: the signed-in user's bookings from $2 on, in time order.
+SELECT a.pkid, a.name, a.starts_at, a.ends_at, a.location, a.done_at
+  FROM appointment_people ap
+  JOIN appointments a ON a.pkid = ap.appointment_id
+  JOIN videos v       ON v.pkid = a.video_id AND v.archived_at IS NULL
+ WHERE ap.user_id = $1 AND ap.archived_at IS NULL AND a.archived_at IS NULL
+   AND a.ends_at >= $2
+ ORDER BY a.starts_at;
+```
 
 ### Templates
 
@@ -1472,7 +1547,9 @@ These rules come from the data model and will surprise people unless the help pa
 - **Every stage has a due time.** Each stage of a video is due a set time before its finish date, so the calendar can warn you early when a video is falling behind.
 
 * **Appointments stay put.** A booked shoot or studio slot keeps its time when the finish date moves. Give it a T-minus (for example, wrap 10 days before finish); if it ends later than that, it shows on the problems report.
-* **A crew can't be in two time slots at once.** Booking a crew, studio or kit that is already booked at an overlapping time is refused. Archive the other booking first, or pick another time. Two shoots at the same location are fine.
+* **A crew can't be in two time slots at once.** Booking a person (directly or through a crew), studio or kit that is already booked at an overlapping time is refused, even when the person is on two crews. Archive the other booking first, or pick another time. Two shoots at the same location are fine.
+* **My appointments.** Everyone sees their own bookings, with time and place, on one page.
+* **Ending someone with bookings ahead.** Archive or reassign their future bookings first; the database won't let a booking sit outside someone's employment.
 
 - **Workflows have versions.** Pick a workflow from the list when you create a video; a template usually picks it for you. Changing a workflow makes a new version. Videos already under way stay on the version they started with unless an admin moves them, and a move never changes their current stage.
 
@@ -1529,3 +1606,4 @@ Added after your notes on shared access, auditing and the calendar:
 
 * [ ] **Q36. Who manages crews and resources?** \[Admins, like the workflow list; it could become its own role.\]
 * [ ] **Q37. Warn ahead, and tell people?** The problems report shows what is already wrong. Should it also warn a few days ahead, and should it email the people involved? \[Report only, for now.\]
+* [ ] **Q38. What can crew members see?** \[Their own bookings: name, time and place. Anything more about the video needs read access to it, as usual.\]
