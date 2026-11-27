@@ -4,7 +4,7 @@ Nov 27, 2026 · @Frederick Price
 
 ## Summary
 
-The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 34 content tables (10 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
+The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 36 content tables (11 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
 
 How to read this draft:
 
@@ -32,9 +32,9 @@ These are the terms the app will use in its screens and its code. The last colum
 | Milestone | A checkpoint on the way to finishing, set as a time before the video's finish date (T-minus), such as script done 10 days before, shoot day, picture lock. It moves when the finish date moves. | `milestones` |
 | Appointment | Something booked at a fixed time, such as a shoot with a guest or a studio slot. Unlike a milestone it stays put when the finish date moves, but it has a T-minus: how long before the finish it must be over. | `appointments` |
 | Resource | A studio or room that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
-| Crew | A named team of users, such as Crew A. Booking a crew books each person on it, so people see their own appointments, and nobody can be in two overlapping time slots even if they are on two crews. | `crews, crew_members, appointment_people` |
+| Crew | A named team of users, such as Crew A. Booking a crew books each person on it, so people see their own appointments (a crew lead sees the whole crew's), and nobody can be in two overlapping time slots even if they are on two crews. | `crews, crew_members, appointment_people` |
 | Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. | `equipment_models, equipment_items, equipment_issues` |
-| Package template | A kit list for a kind of job, such as Interview kit: models and how many, never serial numbers. The same gear can be packed by many templates. | `package_templates, package_template_items` |
+| Package template | A kit list for a kind of job, such as Interview kit: models and how many, never serial numbers. Video templates can bring kits along. The same gear can be packed by many templates. | `package_templates, package_template_items` |
 | Package | One crate packed for one appointment: what it needs (copied from a template) and the tagged items actually in it. Ticked off on screen as it is packed, and prints as a checklist. An item can't be in two packages at overlapping times. | `packages, package_needs, package_items` |
 | Finish date (T-0) | The moment a video must be finished and ready to publish. Every video has one, even a pitch. Milestones and asset needs count back from it (T-minus) and go-live times count forward (T-plus), so moving it moves the whole plan. | `videos.finish_at` |
 | Template | A reusable starting point. A video template holds format, brief, script, a rundown of library segments, the assets it always uses, milestones timed before finish and publishing defaults per channel. Segment templates (a standard intro, a sponsor read) and series templates work the same way. Saved from an existing item or built by hand; a template can never be published itself. | `video_templates` and its child tables |
@@ -153,7 +153,7 @@ A pitch that is turned down moves to **Dropped**, so it stays on record and out 
 
 ## Proposed Postgres schema
 
-Fifty-two tables: thirty-four for content (ten of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Fifty-four tables: thirty-six for content (eleven of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
 **Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, and the freeze that stops a published workflow version from changing. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
@@ -837,6 +837,7 @@ CREATE TABLE crew_members (                    -- dated: who was on which crew, 
     user_id      UUID NOT NULL REFERENCES users(pkid),
     starts_at    TIMESTAMPTZ NOT NULL,
     ends_at      TIMESTAMPTZ,
+    is_lead      BOOLEAN NOT NULL DEFAULT FALSE,  -- a lead sees every booking of the crew's members
     employment   TSTZRANGE NOT NULL,        -- copy of the person's employment
     CHECK (ends_at IS NULL OR ends_at > starts_at),
     FOREIGN KEY (user_id, employment) REFERENCES users (pkid, employment) ON UPDATE CASCADE,
@@ -971,6 +972,16 @@ CREATE TABLE package_items (
 );
 CREATE UNIQUE INDEX ON package_items (package_id, item_id) WHERE archived_at IS NULL;
 
+-- The kits a video will need ('Interview kit'), usually copied from its video template. When
+-- the video gets an appointment, its packages are packed from these.
+CREATE TABLE video_kits (
+    pkid                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    video_id            UUID NOT NULL REFERENCES videos(pkid),
+    package_template_id UUID NOT NULL REFERENCES package_templates(pkid),
+    archived_at         TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON video_kits (video_id, package_template_id) WHERE archived_at IS NULL;
+
 -- ===== Templates =====
 -- A template is a starting point, not real work: it has no workflow state, no publications and
 -- no dates, only offsets, so it can never be scheduled or published by mistake. Separate tables
@@ -1059,6 +1070,16 @@ CREATE TABLE milestone_templates (
 );
 CREATE UNIQUE INDEX ON milestone_templates (video_template_id, lower(name)) WHERE archived_at IS NULL;
 
+-- Kits a video template brings along, copied into video_kits for each new video.
+CREATE TABLE video_template_kits (
+    pkid                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    video_template_id   UUID NOT NULL REFERENCES video_templates(pkid),
+    package_template_id UUID NOT NULL REFERENCES package_templates(pkid),
+    archived_at         TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON video_template_kits (video_template_id, package_template_id)
+    WHERE archived_at IS NULL;
+
 -- Publishing defaults: one row per channel the new video should go to, with its go-live offset,
 -- visibility and text. A channel with no row starts as 'Skipped' on the new video.
 CREATE TABLE publication_templates (
@@ -1122,7 +1143,7 @@ BEGIN
                              'appointment_resources', 'crews', 'crew_members', 'appointment_people',
                              'equipment_models', 'equipment_items', 'equipment_issues',
                              'package_templates', 'package_template_items', 'packages',
-                             'package_needs', 'package_items',
+                             'package_needs', 'package_items', 'video_kits', 'video_template_kits',
                              'workflows', 'workflow_transitions', 'video_templates', 'segment_templates',
                              'video_template_segments', 'video_template_assets',
                              'segment_template_assets', 'milestone_templates',
@@ -1460,7 +1481,7 @@ New series are made with a wizard: pick a series template or start blank, name t
 Some things happen at a fixed time and must not move with the finish date: a shoot booked with a guest, a studio slot, an interview. These are **appointments**, kept apart from milestones. An appointment has a real start and end and stays put, while a milestone counts back from the finish.
 
 - **Appointments still have a T-minus.** Each one says how long before the finish it must be over (`needed_before`), such as a shoot that must wrap 10 days before finish so editing has time. The appointment doesn't move, but its deadline does, so a finish date moved earlier can leave it too late.
-- **Crews are made of people, and people are users.** A **crew** (Crew A) is a named team; membership is dated and stays inside each person's employment, like group membership. Booking a crew onto an appointment books each person on it at that moment, so everyone can see and report on their own appointments.
+- **Crews are made of people, and people are users.** A **crew** (Crew A) is a named team; membership is dated and stays inside each person's employment, like group membership. Booking a crew onto an appointment books each person on it at that moment, so everyone can see and report on their own appointments. A member marked as crew lead also sees every booking of the people on that crew.
 - **Nobody can be in two time slots at once.** The database refuses any booking of a person whose time overlaps another of their bookings, even when they are on two crews. That covers moving an appointment into a clash and bringing back an archived one. A person also can't be booked outside their employment, so ending someone with bookings still ahead is refused until those bookings are archived.
 - **Studios and rooms are resources,** booked the same way and with the same rule. Locations don't clash: a crew can work at several locations in a day, and a location can host several shoots, even at once. Crews and resources are company-wide, because they can work for several calendars.
 - **The problems report** (`schedule_problems`) lists what needs a person's attention: an appointment that ends later than its T-minus allows (including one now after the finish), an overdue milestone, a video still in a stage whose deadline has passed, and an asset that isn't ready when a video needs it. Each row points to its video, so someone can move the appointment, the finish date, or both.
@@ -1490,13 +1511,29 @@ SELECT a.pkid, a.name, a.starts_at, a.ends_at, a.location, a.done_at
  ORDER BY a.starts_at;
 ```
 
+```sql
+-- Crew lead's page: bookings of everyone on the crews user $1 leads right now, from $2 on.
+SELECT DISTINCT u.display_name, a.pkid, a.name, a.starts_at, a.ends_at, a.location
+  FROM crew_members lead
+  JOIN crew_members cm       ON cm.crew_id = lead.crew_id
+                            AND tstzrange(cm.starts_at, cm.ends_at, '[)') @> now()
+  JOIN users u               ON u.pkid = cm.user_id
+  JOIN appointment_people ap ON ap.user_id = cm.user_id AND ap.archived_at IS NULL
+  JOIN appointments a        ON a.pkid = ap.appointment_id AND a.archived_at IS NULL
+  JOIN videos v              ON v.pkid = a.video_id AND v.archived_at IS NULL
+ WHERE lead.user_id = $1 AND lead.is_lead
+   AND tstzrange(lead.starts_at, lead.ends_at, '[)') @> now()
+   AND a.ends_at >= $2
+ ORDER BY a.starts_at, u.display_name;
+```
+
 ### Equipment and packages
 
 Gear is tracked piece by piece, because there may be several of the same camera and each one wears out or breaks on its own.
 
 - **Models and items.** A **model** is a kind of gear (Sony FX3); an **item** is one piece of it. The system gives every item its own asset tag number to print on a labeler and stick on the gear, so nobody has to find the maker's serial number (which can still be recorded, and can't repeat within a model). Tags are never reused, even after an item is retired.
 - **Package templates are kit lists** for a kind of job, such as "Interview kit: 2 × Sony FX3, 1 × Rode NTG5". They name models, not serial numbers, so the same gear can be repacked into different packages for different kinds of work.
-- **A package is one crate for one appointment.** Packing from a template copies its list into the package's needs, which can then be changed. Then real items are packed against it. The checklist lives on screen: ticking an item as it goes in the crate records when (and the audit log records who), so anyone can see how far packing has got. It also prints for the crate: each model, how many are needed, and the asset tags packed, with a box to tick.
+- **A package is one crate for one appointment.** Packing from a template copies its list into the package's needs, which can then be changed. A video template can bring its kits along, so a new video already lists the kits its shoots will need. Then real items are packed against it. The checklist lives on screen: ticking an item as it goes in the crate records when (and the audit log records who), so anyone can see how far packing has got. It also prints for the crate: each model, how many are needed, and the asset tags packed, with a box to tick.
 - **Gear can't be in two places at once.** An item can't be in two packages whose appointments overlap in time. Moving an appointment into a clash or bringing back an archived package is refused too. Archiving a package or its appointment unpacks the gear.
 - **History and damage.** Every package an item was in stays on record, so you can see where it went, and wear or damage is logged as an issue on the item. The problems report flags a package that is short of what it needs, and packed gear with an open issue, for appointments still to come.
 
@@ -1743,7 +1780,7 @@ These rules come from the data model and will surprise people unless the help pa
 
 * **Appointments stay put.** A booked shoot or studio slot keeps its time when the finish date moves. Give it a T-minus (for example, wrap 10 days before finish); if it ends later than that, it shows on the problems report.
 * **A crew can't be in two time slots at once.** Booking a person (directly or through a crew), a studio or a piece of gear that is already booked at an overlapping time is refused, even when the person is on two crews. Archive the other booking first, or pick another time. Two shoots at the same location are fine.
-* **My appointments.** Everyone sees their own bookings, with time and place, on one page.
+* **My appointments.** Everyone sees their own bookings, with time and place, on one page. Crew leads also see every booking of their crew.
 * **Ending someone with bookings ahead.** Archive or reassign their future bookings first; the database won't let a booking sit outside someone's employment.
 * **Packing for a shoot.** Pick a package template, adjust the list, then pack items by their asset tags, ticking each one off on screen as it goes in (or print the checklist for the crate). New gear gets its asset tag when it is added; print the label and stick it on. Gear already packed for an overlapping appointment is refused; log any wear or damage on the item.
 
@@ -1802,6 +1839,6 @@ Added after your notes on shared access, auditing and the calendar:
 
 * [ ] **Q36. Who manages crews, rooms and equipment?** \[Admins, like the workflow list; it could become its own role.\]
 * [ ] **Q37. Warn ahead, and tell people?** The problems report shows what is already wrong. Should it also warn a few days ahead, and should it email the people involved? \[Report only, for now.\]
-* [ ] **Q38. What can crew members see?** \[Their own bookings: name, time and place. Anything more about the video needs read access to it, as usual.\]
-* [ ] **Q39. Should video templates carry appointments and kit lists,** so a new episode comes with its shoot and package templates ready? \[Not yet; add packages per appointment.\]
+* [ ] **Q38. What can crew members see?** Answered: crew members see only their own bookings; a crew lead sees every booking of the people on the crews they lead. Anything more about the video still needs read access to it.
+* [ ] **Q39. Should video templates carry appointments and kit lists,** so a new episode comes with its shoot and package templates ready? Answered: video templates carry kits, copied to each new video. Shoots themselves aren't templated yet.
 * [ ] **Q40. Should gear with an open issue be blocked from packing?** \[No, just flagged on the problems report, since some wear is fine.\]
