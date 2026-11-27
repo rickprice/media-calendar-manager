@@ -13,12 +13,12 @@
 2. **Database Migrations:** All schema changes must go into `migrations/` as numbered `.sql` files (e.g., `0001_create_users.sql`). Run `sqlx migrate run` before compiling so `sqlx` compile-time macros verify against the live schema.
 3. **Error Handling:** Use a single `AppError` enum in `src/error.rs` implementing `axum::response::IntoResponse`. Avoid `.unwrap()` or `.expect()` inside route handlers.
 4. **Multiuser Security:** Content belongs to the company, not a user. Every query for
-   content MUST (a) check the `AuthSession` user's employment covers now(), and (b) require the needed level from
-   `effective_access` for that object type on its calendar or channel: `read` to view,
-   `edit` to create, change or delete. Never take a user, calendar or channel
+   content MUST (a) check the `AuthSession` user's employment covers now(), and (b) require the needed
+   permission from `effective_access` for that screen, company-wide or on its calendar or channel:
+   view to see it, insert to create, modify to change, delete to archive. Never take a user, calendar or channel
    id from the request as proof of access. Admin-only actions (calendars, channels, groups,
    roles, grants) need a current admin assignment. Reading the audit log needs admin,
-   auditor, or `read` on `audit_log` for that calendar. Auditors never get `edit`.
+   auditor, or the `audit_log` (History) screen for that calendar. Auditors only ever view.
    "Current" always means valid at now(). Store every date and time as TIMESTAMPTZ
    (UTC), never DATE, and show it in the viewer's own time zone.
    **No deletes:** Never write `DELETE` for app data. Hide things by setting `archived_at`

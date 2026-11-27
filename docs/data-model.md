@@ -103,13 +103,13 @@ These are the terms the app will use in its screens and its code. The last colum
 | --- | --- | --- |
 | Instance | One installation of the app for one company, with its own database. A second company gets its own instance, so a breach or bug cannot cross between them. | settings (name, home time zone) |
 | User | One person's time with the company, from a start date to an optional end date; someone who returns gets a new user. Each user has a time zone, used to show every time on screen. | `users`, `time_zones` |
-| Admin | A user who creates calendars, channels, groups and roles and hands out access. Admins can edit everything. An auditor can read everything, including the full audit log, and change nothing. A workflow editor builds and publishes workflows, and gets no other access from that role. | `system_roles` |
+| Admin | A user who creates calendars, channels, groups and roles and hands out access. Admins can do everything on every screen. An auditor can view every screen, including the full history, and change nothing. | `system_roles` |
 | Group | A named set of people, such as Editors or Freelance designers. | `groups`, `group_members` |
-| Object type | The kinds of thing access is set for: calendar, channel, series, video, segment, asset, publication, milestone, and audit\_log (who may read a calendar's history). | `object_type` enum |
-| Access level | `none`, `read` or `edit`, in that order. | `access_level` enum |
-| Role | A reusable set of levels, one per object type. Example: Thumbnail designer = edit assets, read videos and segments, none for publications. | `roles`, `role_permissions` |
-| Grant | Gives one group one role on a whole calendar, or on one channel inside it, covering everything underneath. | `calendar_grants`, `channel_grants` |
-| Effective access | What a person can actually do: the highest level from any of their groups' grants, or edit if they are an admin. | `effective_access` view |
+| Screen | One area of the app, such as Videos, Assets, Publishing, History or Equipment. Access is set per screen. Most screens show one calendar's work; company-wide screens (Equipment, Kits, Crews, Rooms and studios, Workflows) belong to no calendar. | `screens` |
+| Permissions | View, insert, modify and delete, set for each screen in a role. The row itself is view, so a role can never change what it can't see. Delete means archive: nothing is ever deleted. | `role_permissions` |
+| Role | A reusable list of the screens it can use, each with what it may do there. Example: Thumbnail designer = Assets (view, insert, modify), Videos and Rundown (view). A group can hold several roles, and a person can be in several groups. | `roles`, `role_permissions` |
+| Grant | Gives one group one role across the whole company, on a whole calendar, or on one channel inside it, covering everything underneath. A group can hold several grants at once. | `company_grants`, `calendar_grants`, `channel_grants` |
+| Effective access | What a person can actually do on each screen, and where: everything their groups' roles allow, added together, or everything if they are an admin. | `effective_access` view |
 
 ## Workflow states
 
@@ -139,7 +139,7 @@ Videos, segments, assets and publications all follow the same plan, make, check,
 | Not needed | Dropped | Cut | Not needed | Skipped |
 | Removed |  |  |  | Removed |
 
-Kinds and options that are not states use the same tiny-table pattern: `platforms`, `video_formats`, `segment_kinds`, `asset_kinds` and `visibilities` (public, unlisted, private), each with a code, a label, an order and `is_active`. Only `object_type` and `access_level` stay as built-in enums, because the access-check code is written against them and the order none, read, edit is what makes the comparison work.
+Kinds and options that are not states use the same tiny-table pattern: `platforms`, `video_formats`, `segment_kinds`, `asset_kinds` and `visibilities` (public, unlisted, private), each with a code, a label, an order and `is_active`. Only `object_type` `stays a built-in enum, because the workflow code is written against it. Screens are a lookup table like the rest`.
 
 ### Steps between states
 
@@ -154,7 +154,7 @@ A pitch that is turned down moves to **Dropped**, so it stays on record and out 
 
 ## Proposed Postgres schema
 
-Fifty-nine tables: forty for content (eleven of them templates) with `calendars` at the top and `videos` at the centre, seven for access, eleven small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Sixty-one tables: forty for content (eleven of them templates) with `calendars` at the top and `videos` at the centre, eight for access, twelve small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
 **Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, the freeze that stops a published workflow version from changing, and the check that only Ready gear is packed. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
@@ -165,22 +165,23 @@ A publication joins a video to a channel, so one video can go out on YouTube and
 ### Ownership, access and safety rules
 
 - **Nothing with history is deleted.** Every table blocks `DELETE` twice: the app's database login lacks the right, and a trigger refuses it anyway. Only a database owner who deliberately switches the trigger off can remove a row. Because creating a row is itself logged, every row has audit history from its first moment, so "no deletes at all" is the same rule as "no deletes once audited", and simpler to build.
-- **Archive instead.** People-facing tables have `one archived_at column; who archived a row, like who created or changed it, is only in the audit log`. Archiving is one click for anyone with `edit` on that object type, is logged, and can be undone. Archived rows vanish from normal pages; the audit view still shows them. Archiving never cascades: an archived video's segments and milestones stay as they were, simply unreachable from normal pages, and the assets it used stay in the calendar's asset library for other videos.
+- **Archive instead.** People-facing tables have `one archived_at column; who archived a row, like who created or changed it, is only in the audit log`. Archiving is one click for anyone with `delete on that screen`, is logged, and can be undone. Archived rows vanish from normal pages; the audit view still shows them. Archiving never cascades: an archived video's segments and milestones stay as they were, simply unreachable from normal pages, and the assets it used stay in the calendar's asset library for other videos.
 - **A user is one stretch of employment.** Users have `started_at` and an optional `ended_at`, both full timestamps. Someone who leaves and comes back gets a new user; the same login name may be reused because the two periods cannot overlap.
 - **Roles are dated too.** Admin and auditor assignments, group memberships and grants each have `starts_at` and an optional `ends_at`. Dates can be edited, every edit is logged, and exclusion constraints refuse any change that would make two periods for the same thing overlap. No assignment or membership can start before the user's start date or end after their end date, and the database itself refuses it, so a coding mistake cannot open that hole. Each dated row carries a copy of the user's employment range; a composite foreign key with ON UPDATE CASCADE keeps the copy equal to the user's real dates, and a CHECK keeps the row's period inside it. Shortening a user's end date is refused while any of their roles still runs later, so the app ends those roles first in the same transaction. As a second guard, access is still intersected with the employment dates.
 - **Native constraints, not triggers.** Every foreign key references its parent's `pkid`. Where two parents must agree, such as a publication's video and channel being on the same calendar, the child also carries the shared column and a composite foreign key enforces it against a `UNIQUE (pkid, calendar_id)` on the parent. Triggers are kept only for the audit log, the no-delete guard, the workflow-step check and the workflow-version freeze, which constraints cannot express.
 - The access tree is: calendar, then series, then videos (every video is in a series), then segments, assets and milestones. Channels also sit under the calendar, and a publication joins a video to one of them. Each channel sits in exactly one calendar (guess, Q18).
 - A video publishes to every channel on its calendar by default: creating it adds a draft publication for each channel. Leaving a channel out is normal and is recorded by setting that publication to `skipped`, with an optional reason.
-- A grant gives a group a role either on a whole calendar (`calendar_grants`) or on one channel (`channel_grants`). They are separate tables, so no grant can be unclear about what it covers, and who manages a channel can change without touching the calendar's grants. A channel-only grant covers that channel and its publications (guess, Q12).
-- `effective_access` lists every level a user holds and the period it is valid (`valid`). The question asked is always: does this user hold the needed level here, right now?
-- When a person holds several levels, the highest wins; there is no explicit deny (guess, Q11).
-- Admins have `edit` on everything and manage calendars, channels, groups, roles and grants. Auditors have `read` on everything, including the full audit log, and change nothing. A role with `read` on `audit_log` makes a calendar-only auditor (Q19). Workflow editors build and publish the company's one list of workflows; that role gives no access to content.
+- A grant gives a group a role across the whole company (`company_grants`), on a whole calendar (`calendar_grants`) or on one channel (`channel_grants`). They are separate tables, so no grant can be unclear about what it covers, and who manages a channel can change without touching the calendar's grants. A channel-only grant covers that channel and its publications (guess, Q12).
+- `effective_access` lists, for each screen a user can use, where they can use it, what they may do there, and the period it is valid (`valid`). The question asked is always: may this user do this, on this screen, here, right now?
+- **What and where are separate.** A role says *what*: which screens, and on each one view, insert, modify or delete. A grant says *where* and *when*: it gives a group a role across the whole company, on one calendar, or on one channel, from a start date to an optional end date. So a Thumbnail designer granted on the Main brand calendar can add and change assets there, and sees nothing on other calendars. Company-wide screens (Equipment, Kits, Crews, Rooms and studios, Workflows) belong to no calendar, so only a company-wide grant reaches them; the same role granted on a calendar simply doesn't open them. Managing users, calendars, channels, groups, roles and grants is not a screen: only admins do it.
+- When a person holds several roles, through one group or several, their permissions add up; there is no explicit deny (guess, Q11).
+- Admins `can do everything on every screen, and they alone manage users, calendars, channels, groups, roles and grants. Auditors can view every screen, including the full history, and change nothing. A role with the History screen makes a calendar-only auditor (Q19). Building and publishing the company's workflows needs insert or modify on the Workflows screen, through a company-wide role`.
 - Postgres 15 or later is needed; the cloud test setup has 16. `btree_gist` provides the no-overlap constraints.
-- States and kinds are lookup tables; the Rust code refers to them by their stable code (loaded once at startup), never by a pkid. Only object\_type and access\_level are Postgres enums, mapped with `#[derive(sqlx::Type)]` (guess). Every primary key is a column named pkid holding a meaningless id generated by the database (a UUID from gen\_random\_uuid(), or an identity number for the audit log), never built from table data. Duplicate records are stopped by UNIQUE and no-overlap constraints instead. This matches the existing `users` table.
+- States and kinds are lookup tables; the Rust code refers to them by their stable code (loaded once at startup), never by a pkid. Only object\_type is a Postgres enum, mapped with `#[derive(sqlx::Type)]` (guess). Every primary key is a column named pkid holding a meaningless id generated by the database (a UUID from gen\_random\_uuid(), or an identity number for the audit log), never built from table data. Duplicate records are stopped by UNIQUE and no-overlap constraints instead. This matches the existing `users` table.
 
 &#91;embedded content: how access is granted · user, group, role, channel\]
 
-The role is the only place per-type levels live, so changing what designers may do is one edit, not one per channel.
+The role is the only place screen permissions live, so changing what designers may do is one edit, not one per channel or group.
 
 ### Draft SQL
 
@@ -215,13 +216,10 @@ This is a sketch for review, not a migration. If you approve it, it would become
 
 CREATE EXTENSION IF NOT EXISTS btree_gist;   -- lets one constraint mix '=' with time-range overlap
 
--- ===== System enums =====
--- Only these two stay enums: the access-check code is written against them, and
--- access_level's order (none < read < edit) is what makes level >= 'read' work.
-CREATE TYPE object_type  AS ENUM ('calendar', 'channel', 'series', 'video', 'segment',
-                                  'asset', 'publication', 'milestone', 'template', 'audit_log',
-                                  'equipment');
-CREATE TYPE access_level AS ENUM ('none', 'read', 'edit');
+-- ===== System enum =====
+-- Only this one stays an enum: the kinds of thing that follow a workflow, which the workflow
+-- code is written against. Access is per screen instead (see screens below).
+CREATE TYPE object_type AS ENUM ('video', 'segment', 'asset', 'publication', 'equipment');
 
 -- ===== Lookup tables =====
 -- Each holds a stable code the app refers to, the label people see, an order, and is_active.
@@ -242,8 +240,7 @@ CREATE TABLE workflow_states (
 -- published it is frozen, and a change means a new version. Items keep the version they use.
 CREATE TABLE workflows (
     pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    object_type  object_type NOT NULL
-                 CHECK (object_type IN ('video', 'segment', 'asset', 'publication', 'equipment')),
+    object_type  object_type NOT NULL,
     name         TEXT NOT NULL,             -- 'Standard', 'Short', 'Live stream'
     version      INT  NOT NULL CHECK (version > 0),
     description  TEXT,
@@ -512,11 +509,10 @@ DROP INDEX idx_users_email;                           -- email is no longer how 
 -- date while a role still runs later is refused as a whole; the app ends those roles
 -- first, in the same transaction. The access view also intersects every period with
 -- employment, as a second guard.
-CREATE TABLE system_roles (                   -- dated company-wide roles: admin, auditor, workflow editor
+CREATE TABLE system_roles (                   -- dated company-wide: admin (everything), auditor (sees all)
     pkid       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id    UUID NOT NULL REFERENCES users(pkid),
-    role       TEXT NOT NULL CHECK (role IN ('admin', 'auditor', 'workflow_editor')),
-                                            -- workflow_editor: may build and publish workflows
+    role       TEXT NOT NULL CHECK (role IN ('admin', 'auditor')),
     starts_at  TIMESTAMPTZ NOT NULL,
     ends_at    TIMESTAMPTZ,                 -- NULL = open-ended
     employment TSTZRANGE NOT NULL,          -- copy of the person's employment
@@ -548,19 +544,62 @@ CREATE TABLE group_members (                  -- dated: who was in which group, 
                         tstzrange(starts_at, ends_at, '[)') WITH &&)
 );
 
+-- Access is per screen. A screen is one area of the app, such as Videos or Equipment. Most
+-- screens show one calendar's work; company-wide ones (gear, crews, rooms, workflows) belong to
+-- no calendar, so only a company-wide role reaches them. Managing users, calendars, channels,
+-- roles and grants is not a screen here: it stays with admins.
+CREATE TABLE screens (
+    pkid            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code            TEXT NOT NULL UNIQUE,   -- the app checks access by this code
+    label           TEXT NOT NULL,
+    sort_order      INT  NOT NULL,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    is_company_wide BOOLEAN NOT NULL DEFAULT FALSE
+);
+INSERT INTO screens (code, label, sort_order, is_company_wide) VALUES
+    ('series', 'Series', 10, FALSE),            ('videos', 'Videos', 20, FALSE),
+    ('segments', 'Rundown', 30, FALSE),         ('assets', 'Assets', 40, FALSE),
+    ('publications', 'Publishing', 50, FALSE),  ('milestones', 'Milestones', 60, FALSE),
+    ('appointments', 'Appointments', 70, FALSE), ('packages', 'Packing', 80, FALSE),
+    ('templates', 'Templates', 90, FALSE),      ('audit_log', 'History', 100, FALSE),
+    ('equipment', 'Equipment', 110, TRUE),      ('kits', 'Kits', 120, TRUE),
+    ('crews', 'Crews', 130, TRUE),              ('resources', 'Rooms and studios', 140, TRUE),
+    ('workflows', 'Workflows', 150, TRUE);
+
 CREATE TABLE roles (
     pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name         TEXT NOT NULL,             -- 'Editor', 'Viewer', 'Thumbnail designer', 'Auditor'
+    name         TEXT NOT NULL,             -- 'Editor', 'Viewer', 'Thumbnail designer', 'Gear manager'
     archived_at  TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX ON roles (lower(name)) WHERE archived_at IS NULL;
 
-CREATE TABLE role_permissions (               -- one row per type; lowering access sets 'none'
+-- One row per screen the role can use. Having the row is the view permission, so a role can
+-- never insert, modify or delete on a screen it cannot see. 'Delete' archives and restores:
+-- nothing is ever deleted. Taking a screen away from a role archives its row.
+CREATE TABLE role_permissions (
     pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     role_id     UUID NOT NULL REFERENCES roles(pkid),
-    object_type object_type  NOT NULL,
-    level       access_level NOT NULL,
-    UNIQUE (role_id, object_type)             -- no duplicate rows for a type
+    screen_id   UUID NOT NULL REFERENCES screens(pkid),
+    can_insert  BOOLEAN NOT NULL DEFAULT FALSE,
+    can_modify  BOOLEAN NOT NULL DEFAULT FALSE,
+    can_delete  BOOLEAN NOT NULL DEFAULT FALSE,
+    archived_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON role_permissions (role_id, screen_id) WHERE archived_at IS NULL;
+
+-- A group can hold several roles at once, each where it applies: across the whole company,
+-- on one calendar, or on one channel, and a person can be in several groups. What they can do
+-- is everything their current roles allow added together; nothing takes access away. The same
+-- role twice in the same place at overlapping times is refused.
+CREATE TABLE company_grants (                 -- dated: a group holds a role everywhere
+    pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    group_id     UUID NOT NULL REFERENCES groups(pkid),
+    role_id      UUID NOT NULL REFERENCES roles(pkid),
+    starts_at    TIMESTAMPTZ NOT NULL,
+    ends_at      TIMESTAMPTZ,
+    CHECK (ends_at IS NULL OR ends_at > starts_at),
+    EXCLUDE USING gist (group_id WITH =, role_id WITH =,
+                        tstzrange(starts_at, ends_at, '[)') WITH &&)
 );
 
 -- ===== Content: calendar at the top =====
@@ -589,9 +628,9 @@ CREATE TABLE channels (
 );
 CREATE UNIQUE INDEX ON channels (calendar_id, lower(name)) WHERE archived_at IS NULL;  -- no twin channels
 
--- Two grant tables, so no row has an optional target: a grant is on a whole calendar or
--- on one channel, never 'maybe a channel'. Who manages a channel can change without
--- touching the calendar's grants.
+-- Separate grant tables, so no row has an optional target: a grant is company-wide (above),
+-- on a whole calendar, or on one channel, never 'maybe a channel'. Who manages a channel can
+-- change without touching the calendar's grants.
 CREATE TABLE calendar_grants (                -- dated: a group holds a role on a whole calendar
     pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     calendar_id  UUID NOT NULL REFERENCES calendars(pkid),
@@ -600,7 +639,7 @@ CREATE TABLE calendar_grants (                -- dated: a group holds a role on 
     starts_at    TIMESTAMPTZ NOT NULL,
     ends_at      TIMESTAMPTZ,
     CHECK (ends_at IS NULL OR ends_at > starts_at),
-    EXCLUDE USING gist (group_id WITH =, calendar_id WITH =,
+    EXCLUDE USING gist (group_id WITH =, role_id WITH =, calendar_id WITH =,
                         tstzrange(starts_at, ends_at, '[)') WITH &&)
 );
 
@@ -614,7 +653,7 @@ CREATE TABLE channel_grants (                 -- dated: a group holds a role on 
     ends_at      TIMESTAMPTZ,
     CHECK (ends_at IS NULL OR ends_at > starts_at),
     FOREIGN KEY (channel_id, calendar_id)   REFERENCES channels  (pkid, calendar_id),   -- channel on that calendar
-    EXCLUDE USING gist (group_id WITH =, channel_id WITH =,
+    EXCLUDE USING gist (group_id WITH =, role_id WITH =, channel_id WITH =,
                         tstzrange(starts_at, ends_at, '[)') WITH &&)
 );
 
@@ -1110,6 +1149,12 @@ CREATE TABLE kit_bookings (
     kit_id     UUID NOT NULL REFERENCES kits(pkid)
 );
 
+
+```
+
+The schema continues: templates, the no-delete guard, workflow triggers, views and indexes.
+
+```sql
 -- ===== Templates =====
 -- A template is a starting point, not real work: it has no workflow state, no publications and
 -- no dates, only offsets, so it can never be scheduled or published by mistake. Separate tables
@@ -1241,12 +1286,6 @@ CREATE TABLE series_templates (
 );
 CREATE UNIQUE INDEX ON series_templates (calendar_id, lower(name)) WHERE archived_at IS NULL;
 
-
-```
-
-The schema continues: the no-delete guard, workflow triggers, views and indexes.
-
-```sql
 -- ===== No deletes, anywhere =====
 -- A grant alone cannot stop a table owner, so this is one of the few places a trigger is used.
 -- The app's database login has no DELETE right on any of these tables, and this trigger
@@ -1260,8 +1299,8 @@ END $$;
 DO $$
 DECLARE t TEXT;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['users', 'system_roles',
-                             'groups', 'group_members', 'roles', 'role_permissions',
+    FOREACH t IN ARRAY ARRAY['users', 'system_roles', 'screens', 'groups', 'group_members',
+                             'roles', 'role_permissions', 'company_grants',
                              'workflow_states', 'workflow_state_usage', 'platforms',
                              'video_formats', 'segment_kinds', 'asset_kinds', 'visibilities', 'time_zones',
                              'calendars', 'channels', 'calendar_grants', 'channel_grants',
@@ -1498,50 +1537,62 @@ SELECT v.calendar_id, v.pkid,
      OR (pi.checked_out_at IS NOT NULL AND a.ends_at < now()));
 
 -- ===== Effective access, with the days each row is valid =====
--- valid = the overlap of the user's employment, the membership or role, and the grant.
--- channel_id NULL = the level applies to the whole calendar. Archived groups, roles,
--- calendars and channels grant nothing.
+-- One row per screen a person can use, where, what they may do there, and when (valid = the
+-- overlap of their employment, their group membership and the grant). calendar_id NULL =
+-- everywhere; channel_id NULL = the whole calendar. Several rows can cover the same screen and
+-- place: a permission holds if any of them gives it. Archived groups, roles, screen rows,
+-- calendars and channels give nothing.
 CREATE VIEW effective_access AS
-SELECT sr.user_id, cal.pkid AS calendar_id, NULL::uuid AS channel_id, t.object_type,
-       (CASE sr.role WHEN 'admin' THEN 'edit' ELSE 'read' END)::access_level AS level,
-       tstzrange(sr.starts_at, sr.ends_at, '[)')
-         * u.employment AS valid
+SELECT sr.user_id, NULL::uuid AS calendar_id, NULL::uuid AS channel_id, s.code AS screen,
+       sr.role = 'admin' AS can_insert, sr.role = 'admin' AS can_modify,
+       sr.role = 'admin' AS can_delete,
+       tstzrange(sr.starts_at, sr.ends_at, '[)') * u.employment AS valid
   FROM system_roles sr
   JOIN users u              ON u.pkid = sr.user_id
-  JOIN calendars cal        ON cal.archived_at IS NULL     -- admins and auditors: every calendar
-  CROSS JOIN unnest(enum_range(NULL::object_type)) AS t(object_type)
- WHERE sr.role IN ('admin', 'auditor')        -- a workflow editor gets no content access from this
+  CROSS JOIN screens s                                -- admins and auditors: every screen
 UNION ALL
-SELECT gm.user_id, g.calendar_id, NULL::uuid, rp.object_type, rp.level,
-       tstzrange(gm.starts_at, gm.ends_at, '[)')
-         * tstzrange(g.starts_at, g.ends_at, '[)')
+SELECT gm.user_id, NULL, NULL, s.code, rp.can_insert, rp.can_modify, rp.can_delete,
+       tstzrange(gm.starts_at, gm.ends_at, '[)') * tstzrange(g.starts_at, g.ends_at, '[)')
+         * u.employment
+  FROM company_grants g
+  JOIN groups gr            ON gr.pkid = g.group_id     AND gr.archived_at IS NULL
+  JOIN group_members gm     ON gm.group_id = g.group_id
+  JOIN roles r              ON r.pkid = g.role_id       AND r.archived_at IS NULL
+  JOIN users u              ON u.pkid = gm.user_id
+  JOIN role_permissions rp  ON rp.role_id = g.role_id   AND rp.archived_at IS NULL
+  JOIN screens s            ON s.pkid = rp.screen_id
+UNION ALL
+SELECT gm.user_id, g.calendar_id, NULL, s.code, rp.can_insert, rp.can_modify, rp.can_delete,
+       tstzrange(gm.starts_at, gm.ends_at, '[)') * tstzrange(g.starts_at, g.ends_at, '[)')
          * u.employment
   FROM calendar_grants g
   JOIN groups gr            ON gr.pkid = g.group_id     AND gr.archived_at IS NULL
+  JOIN group_members gm     ON gm.group_id = g.group_id
   JOIN roles r              ON r.pkid = g.role_id       AND r.archived_at IS NULL
   JOIN calendars cal        ON cal.pkid = g.calendar_id AND cal.archived_at IS NULL
-  JOIN group_members gm     ON gm.group_id = g.group_id
   JOIN users u              ON u.pkid = gm.user_id
-  JOIN role_permissions rp  ON rp.role_id = g.role_id
+  JOIN role_permissions rp  ON rp.role_id = g.role_id   AND rp.archived_at IS NULL
+  JOIN screens s            ON s.pkid = rp.screen_id    AND NOT s.is_company_wide
 UNION ALL
-SELECT gm.user_id, g.calendar_id, g.channel_id, rp.object_type, rp.level,
-       tstzrange(gm.starts_at, gm.ends_at, '[)')
-         * tstzrange(g.starts_at, g.ends_at, '[)')
+SELECT gm.user_id, g.calendar_id, g.channel_id, s.code, rp.can_insert, rp.can_modify, rp.can_delete,
+       tstzrange(gm.starts_at, gm.ends_at, '[)') * tstzrange(g.starts_at, g.ends_at, '[)')
          * u.employment
   FROM channel_grants g
   JOIN groups gr            ON gr.pkid = g.group_id     AND gr.archived_at IS NULL
+  JOIN group_members gm     ON gm.group_id = g.group_id
   JOIN roles r              ON r.pkid = g.role_id       AND r.archived_at IS NULL
   JOIN calendars cal        ON cal.pkid = g.calendar_id AND cal.archived_at IS NULL
   JOIN channels ch          ON ch.pkid = g.channel_id   AND ch.archived_at IS NULL
-  JOIN group_members gm     ON gm.group_id = g.group_id
   JOIN users u              ON u.pkid = gm.user_id
-  JOIN role_permissions rp  ON rp.role_id = g.role_id;
+  JOIN role_permissions rp  ON rp.role_id = g.role_id   AND rp.archived_at IS NULL
+  JOIN screens s            ON s.pkid = rp.screen_id    AND NOT s.is_company_wide;
 
 -- Lookups: every foreign key column is indexed (Postgres does not do this by itself);
 -- normal pages only read live rows, so most indexes skip archived ones. The lookup tables
 -- are a few rows each, so their own foreign keys need no index.
 CREATE INDEX ON system_roles      (user_id);
 CREATE INDEX ON group_members     (user_id);
+CREATE INDEX ON company_grants    (group_id);
 CREATE INDEX ON calendar_grants   (group_id);
 CREATE INDEX ON calendar_grants   (calendar_id);
 CREATE INDEX ON channel_grants    (group_id);
@@ -1572,10 +1623,9 @@ SELECT v.pkid, v.working_title, v.state_id, v.finish_at
    AND EXISTS (SELECT 1 FROM effective_access ea
                 WHERE ea.user_id = $2            -- from AuthSession, never from the request
                   AND ea.valid @> now()          -- right now
-                  AND ea.calendar_id = v.calendar_id
-                  AND ea.channel_id IS NULL      -- video access comes from calendar-wide grants
-                  AND ea.object_type = 'video'
-                  AND ea.level >= 'read');
+                  AND (ea.calendar_id IS NULL    -- a company-wide role, or one on this
+                       OR (ea.calendar_id = v.calendar_id AND ea.channel_id IS NULL))  -- calendar
+                  AND ea.screen = 'videos');     -- having the row is view; editing adds can_modify
 ```
 
 ### Report: what uses this asset?
@@ -1835,16 +1885,16 @@ Work is often made to the same pattern, so a calendar keeps **templates** for th
 - **New video from template.** You give the new video a finish date, and the app copies everything in, with every date counted from it.
 - **No link afterwards.** Editing a template never changes videos already made from it. The audit log records which template a video started from.
 - **Can't be published by mistake.** Templates live in their own tables with no workflow state or publications, so the database cannot schedule one.
-- **Access.** Templates belong to a calendar and use the `template` object type, so a role can let someone use templates without letting them edit them.
+- **Access.** Templates belong to a calendar and `have their own Templates screen`, so a role can let someone use templates without letting them edit them.
 
 **Editor project files (a note only, not in the schema yet).** A segment, and a segment template, could later carry the editing project for that part of the video, such as a Kdenlive project (a .kdenlive XML file), in a large text column, so a new video starts with its timeline already set up. The segment tables are unchanged for now. See Q28.
 
 ### Can this user do this, right now?
 
-Every request answers one question before it acts: does the signed-in user hold the needed level on this type of object, here, right now? If yes, the action runs and the triggers log it in the same transaction. If no, the app returns 403 and logs the refusal.
+Every request answers one question before it acts: may the signed-in user do this (view, insert, modify or delete) on this screen, here, right now? If yes, the action runs and the triggers log it in the same transaction. If no, the app returns 403 and logs the refusal.
 
 1. On each request, check the user's employment (`started_at` to `ended_at`) covers the current moment. If not, end the session.
-2. Load the user's current access once per request: `SELECT calendar_id, channel_id, object_type, max(level) FROM effective_access WHERE user_id = $1 AND valid @> now() GROUP BY 1, 2, 3`. For a normal person that is tens of rows, found through the `user_id` indexes on `system_roles` and `group_members`.
+2. Load the user's current access once per request: `SELECT calendar_id, channel_id, screen, bool_or(can_insert), bool_or(can_modify), bool_or(can_delete) FROM effective_access WHERE user_id = $1 AND valid @> now() GROUP BY 1, 2, 3`. For a normal person that is tens of rows, found through the `user_id` indexes on `system_roles` and `group_members`.
 3. Keep those rows in the request as a small map. Each `require_access(...)` check is then a lookup in memory, with no extra query.
 4. List pages put the same rule in SQL (for example `calendar_id = ANY($readable_calendars)`), so rows a user cannot see are never loaded.
 5. Nothing is cached between requests, so an ended role, membership or user stops working on the very next click.
@@ -1916,7 +1966,7 @@ Every change to content or access, and every sign-in event, writes one row to `a
 | Login success and failure | App | Login name tried, IP, user agent; never the password |
 | Logout and session expiry | App | Session reference (hashed) |
 | Password change or reset, lock and unlock, user created or end-dated | App | Who did it and to whom |
-| Access denied (a user tried something their role forbids) | App | Object and level asked for |
+| Access denied (a user tried something their role forbids) | App | Screen and permission asked for |
 
 ### How it works
 
@@ -1973,7 +2023,7 @@ A company tool holding unreleased content and client work needs these from the f
 Most screens are the same idea again and again: a list, a form to add or change a row, and an archive button. They should come from shared code, not be written by hand each time.
 
 - **Look for a crate first.** At a first look, the Rust admin crates for axum (such as `axum-admin`, `adminx` and `rustango`) are young or bring their own data layer, sign-in or JavaScript, and none of them would run our rules for us: the access check against `effective_access`, the audit transaction that sets `app.user_id`, `app.ip` and `app.request_id`, CSRF on every POST, and archive instead of delete. Worth a closer look before we write our own, but probably not a fit.
-- **Otherwise, one shared CRUD module.** A Rust trait describes a table once: its fields, labels, which lookup each foreign key picks from, its object type for access, and its `sqlx::query!` statements. Generic axum handlers then give list, view, new, edit and archive pages for any table that implements it, and shared Askama templates draw them with Pico.css, using HTMX for inline edits and for ticking checklist items. Every write goes through one helper that checks access, opens the audit transaction and handles CSRF, so no screen can skip those.
+- **Otherwise, one shared CRUD module.** A Rust trait describes a table once: its fields, labels, which lookup each foreign key picks from, its screen for access, and its `sqlx::query!` statements. Generic axum handlers then give list, view, new, edit and archive pages for any table that implements it, and shared Askama templates draw them with Pico.css, using HTMX for inline edits and for ticking checklist items. Every write goes through one helper that checks access, opens the audit transaction and handles CSRF, so no screen can skip those.
 - **Hand-written screens only where the work is special,** such as the calendar, the series wizard, the packing checklist and the problems report.
 
 ## Proposed CLAUDE.md changes
@@ -1982,13 +2032,12 @@ Rule 4 in the repo's CLAUDE.md says every query must filter by `user_id`. Shared
 
 ```markdown
 4. **Multiuser Security:** Content belongs to the company, not a user. Every query for
-   content MUST (a) check the `AuthSession` user's employment covers now(), and (b) require the needed level from
-   `effective_access` for that object type on its calendar or channel: `read` to view,
-   `edit` to create, change or delete. Never take a user, calendar or channel
+   content MUST (a) check the `AuthSession` user's employment covers now(), and (b) require the needed
+   permission from `effective_access` for that screen, company-wide or on its calendar or channel:
+   view to see it, insert to create, modify to change, delete to archive. Never take a user, calendar or channel
    id from the request as proof of access. Admin-only actions (calendars, channels, groups,
-   roles, grants) need a current admin assignment; building or publishing workflows needs a
-   current admin or workflow_editor assignment. Reading the audit log needs admin,
-   auditor, or `read` on `audit_log` for that calendar. Auditors never get `edit`.
+   roles, grants) need a current admin assignment. Reading the audit log needs admin,
+   auditor, or the `audit_log` (History) screen for that calendar. Auditors only ever view.
    "Current" always means valid at now(). Store every date and time as TIMESTAMPTZ
    (UTC), never DATE, and show it in the viewer's own time zone.
    **No deletes:** Never write `DELETE` for app data. Hide things by setting `archived_at`
@@ -2048,7 +2097,7 @@ Your answers decide the first migration. Where I had to pick, the draft uses the
 
 - [ ] **Q1. One video, several channels?** Answered: yes. A video goes to every channel on its calendar by default, and skipping some is normal. Draft: \[Yes: one `publications` row per channel.\]
 - [ ] **Q2. Reusable assets?** Do intro music, logos or lower-third templates get reused across many videos, and should the app track them once? Answered: yes. Assets belong to the calendar's asset library and videos share them through video\_assets. The asset usage report shows where each one is used.
-- [ ] **Q3. Just you, or a team?** Answered: it is a company tool with groups, roles and per-type access. Still open: should work be assigned to named people, and should approvals be recorded as sign-offs? \[Not yet; the audit log shows who changed the stage.\]
+- [ ] **Q3. Just you, or a team?** Answered: it is a company tool with groups, roles and per-screen access. Still open: should work be assigned to named people, and should approvals be recorded as sign-offs? \[Not yet; the audit log shows who changed the stage.\]
 - [ ] **Q4. Scenes and shots?** Do you plan at the level of individual shots (a shot list), or are segments enough? \[Segments are enough.\]
 - [ ] **Q5. How much rights tracking?** Is a source, terms and an expiry date on each asset enough, or do you need licences as their own records with documents? \[Three columns on `assets`.\]
 - [ ] **Q6. Where do files live?** Should the app hold uploaded files, or only link to Drive, Dropbox or a local path? \[Links only.\]
@@ -2058,8 +2107,8 @@ Your answers decide the first migration. Where I had to pick, the draft uses the
 
 Added after your notes on shared access, auditing and the calendar:
 
-- [ ] **Q10. Roles, or levels set per grant?** The draft uses reusable roles (Editor, Viewer, Thumbnail designer). The alternative is to set the seven levels directly on each grant: simpler tables, more clicking.
-- [ ] **Q11. Can a grant take access away?** \[No: the highest level from any group wins, and there is no deny.\]
+- [ ] **Q10. Roles, or levels set per grant?** The draft uses reusable roles (Editor, Viewer, Thumbnail designer). The alternative is to set screen permissions directly on each grant: simpler tables, more clicking.
+- [ ] **Q11. Can a grant take access away?** \[No: permissions from all of a person's roles add up, and there is no deny.\]
 - [ ] **Q12. Cross-posting and access.** Should someone granted only the Facebook channel see the videos themselves (script, assets), or just the Facebook publications? \[Just the publications; video access comes from a calendar-wide grant.\]
 - [ ] **Q13. Grants below the channel?** Do you ever need to share a single series or video with someone, such as a client reviewing one episode? \[No: calendar and channel only.\]
 - [ ] **Q14. One company per installation?** Answered: yes. Each company gets its own installation and database, so a breach or bug cannot spill from one company into another.
@@ -2068,7 +2117,7 @@ Added after your notes on shared access, auditing and the calendar:
 - [ ] **Q17. Two-factor sign-in.** \[Required for admins, optional for everyone else.\] Should it be required for all?
 - [ ] **Q18. What is a calendar to you?** One per client, per brand, or per team? Can one channel appear on two calendars? \[An installation has several calendars, and each channel belongs to exactly one.\]
 
-* [ ] **Q19. How wide is the audit role?** \[Two options, both in the draft: an Auditor who reads everything and the whole log, and a role with read on `audit_log` for one calendar.\] Is the instance-wide one enough? Should an admin also be barred from being an auditor?
+* [ ] **Q19. How wide is the audit role?** \[Two options, both in the draft: an Auditor who reads everything and the whole log, and a role with `the History screen` for one calendar.\] Is the instance-wide one enough? Should an admin also be barred from being an auditor?
 
 - [ ] **Q20. Log reads too?** Should viewing a page be logged, or only changes, sign-ins and refused attempts? \[Only changes, sign-ins and refusals; logging every view multiplies the log many times over.\]
 - [ ] **Q21. When does a date take effect?** \[Answered: every date has a time and is stored in UTC, shown in each user's own zone. A due date is a moment, such as 8:00 AM on a given day; an end date is the moment access stops.\]
@@ -2090,7 +2139,7 @@ Added after your notes on shared access, auditing and the calendar:
 * [ ] **Q32. Stage deadlines per format?** Answered by versioned workflows: deadlines belong to each workflow, so Shorts use a Short workflow with its own clock, and a video template names its workflow.
 * [ ] **Q33. Cadences that one interval can't say.** Answered: yes. A cadence is a cycle with any number of release times, so Tuesdays and Thursdays is one cadence. "First Monday of the month" still doesn't fit; move those slots by hand.
 
-- [ ] **Q34. Who builds and publishes workflows?** Answered: a role. Admins can give people the workflow editor role; everyone else picks from the list.
+- [ ] **Q34. Who builds and publishes workflows?** Answered: a role with the Workflows screen, given company-wide; everyone else picks from the list.
 - [ ] **Q35. Workflows per calendar?** Answered: one list for the whole company.
 
 * [ ] **Q36. Who manages crews, rooms and equipment?** \[Admins, like the workflow list; it could become its own role.\]
@@ -2099,3 +2148,4 @@ Added after your notes on shared access, auditing and the calendar:
 * [ ] **Q39. Should video templates carry appointments and kit lists,** so a new episode comes with its shoot and package templates ready? Answered: video templates carry kits, copied to each new video. Shoots themselves aren't templated yet.
 * [ ] **Q40. Should gear with an open issue be blocked from packing?** Answered: gear has its own workflow (Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair), only Ready gear can be packed, and kits are persistent crates.
 * [ ] **Q41. Count consumables back in?** Should leftover batteries and tape be counted when a crate comes back, to track what was used? \[No, for now: restocking the crate covers it.\]
+* [ ] **Q42. Is the screen list right?** A first guess: Series, Videos, Rundown, Assets, Publishing, Milestones, Appointments, Packing, Templates and History on each calendar, plus company-wide Equipment, Kits, Crews, Rooms and studios, and Workflows. Should any be split or merged? Adding one later is a new row, not a schema change.
