@@ -4,7 +4,7 @@ Nov 27, 2026 · @Frederick Price
 
 ## Summary
 
-The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 26 content tables (8 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
+The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 34 content tables (10 of them for templates), 7 access tables, 10 small lookup and workflow tables and 1 audit table beside the existing `users` table.
 
 How to read this draft:
 
@@ -31,8 +31,11 @@ These are the terms the app will use in its screens and its code. The last colum
 | Pitch / brief | A short statement of the idea, audience and angle, written before any work starts. A pitch is not a separate kind of thing: it is a video in its first state, Pitch, and green-lighting it moves the same video on. | `videos.brief` |
 | Milestone | A checkpoint on the way to finishing, set as a time before the video's finish date (T-minus), such as script done 10 days before, shoot day, picture lock. It moves when the finish date moves. | `milestones` |
 | Appointment | Something booked at a fixed time, such as a shoot with a guest or a studio slot. Unlike a milestone it stays put when the finish date moves, but it has a T-minus: how long before the finish it must be over. | `appointments` |
-| Resource | A studio, room or piece of kit that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
+| Resource | A studio or room that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
 | Crew | A named team of users, such as Crew A. Booking a crew books each person on it, so people see their own appointments, and nobody can be in two overlapping time slots even if they are on two crews. | `crews, crew_members, appointment_people` |
+| Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. | `equipment_models, equipment_items, equipment_issues` |
+| Package template | A kit list for a kind of job, such as Interview kit: models and how many, never serial numbers. The same gear can be packed by many templates. | `package_templates, package_template_items` |
+| Package | One crate packed for one appointment: what it needs (copied from a template) and the tagged items actually in it. Ticked off on screen as it is packed, and prints as a checklist. An item can't be in two packages at overlapping times. | `packages, package_needs, package_items` |
 | Finish date (T-0) | The moment a video must be finished and ready to publish. Every video has one, even a pitch. Milestones and asset needs count back from it (T-minus) and go-live times count forward (T-plus), so moving it moves the whole plan. | `videos.finish_at` |
 | Template | A reusable starting point. A video template holds format, brief, script, a rundown of library segments, the assets it always uses, milestones timed before finish and publishing defaults per channel. Segment templates (a standard intro, a sponsor read) and series templates work the same way. Saved from an existing item or built by hand; a template can never be published itself. | `video_templates` and its child tables |
 | Workflow | A named, versioned set of stages, deadlines and allowed steps for one type of item, such as Standard or Short. Picked from a list when an item is created. A published version never changes; a change is a new version. | `workflows` |
@@ -150,7 +153,7 @@ A pitch that is turned down moves to **Dropped**, so it stays on record and out 
 
 ## Proposed Postgres schema
 
-Forty-four tables: twenty-six for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Fifty-two tables: thirty-four for content (ten of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
 **Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, and the freeze that stops a published workflow version from changing. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
@@ -787,12 +790,13 @@ CREATE TABLE appointments (
     UNIQUE (pkid, period, is_live)         -- copied onto each booking below
 );
 
--- Rooms and kit that can only be in one time slot at a time (people are booked below, as users).
--- A location is not a resource: it can host several shoots at once. Company-wide, because a
--- studio can serve several calendars.
+-- Rooms and studios that can only be in one time slot at a time. People are booked below as
+-- users, and gear as serial-numbered equipment packed into packages. A location is not a
+-- resource: it can host several shoots at once. Company-wide, because a studio can serve
+-- several calendars.
 CREATE TABLE resources (
     pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT NOT NULL,             -- 'Studio 2', 'Drone kit'
+    name        TEXT NOT NULL,             -- 'Studio 2', 'Edit suite'
     notes       TEXT,
     archived_at TIMESTAMPTZ
 );
@@ -862,6 +866,110 @@ CREATE TABLE appointment_people (
         WHERE (appointment_live AND archived_at IS NULL)     -- one time slot at a time
 );
 CREATE UNIQUE INDEX ON appointment_people (appointment_id, user_id) WHERE archived_at IS NULL;
+
+-- ===== Equipment =====
+-- Gear is tracked piece by piece, because there may be several of the same thing and each one
+-- wears out or breaks on its own. A model is the kind of thing ('Sony FX3', 'Rode NTG5'); an item
+-- is one piece of it. Each item gets an asset tag number from the database, printed on a label
+-- and stuck on the gear, so nobody has to hunt for the maker's serial. Company-wide, like crews.
+CREATE TABLE equipment_models (
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    notes       TEXT,
+    archived_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON equipment_models (lower(name)) WHERE archived_at IS NULL;
+
+CREATE TABLE equipment_items (
+    pkid          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id      UUID NOT NULL REFERENCES equipment_models(pkid),
+    asset_tag     BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY UNIQUE,  -- on the label; never reused
+    serial_number TEXT,                     -- the maker's serial, if known
+    nickname      TEXT,                     -- 'Camera B'
+    acquired_at   TIMESTAMPTZ,
+    archived_at   TIMESTAMPTZ               -- retired, sold or written off
+);
+CREATE UNIQUE INDEX ON equipment_items (model_id, lower(serial_number));  -- even once retired
+
+-- Wear and damage reports. Where an item has been is its packing history (package_items);
+-- this records what was found. An open issue shows on the problems report while the item is
+-- packed for an appointment still to come.
+CREATE TABLE equipment_issues (
+    pkid          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_id       UUID NOT NULL REFERENCES equipment_items(pkid),
+    reported_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    description   TEXT NOT NULL,            -- 'cracked hot shoe', 'battery holds 40%'
+    resolved_at   TIMESTAMPTZ,
+    archived_at   TIMESTAMPTZ,
+    CHECK (resolved_at IS NULL OR resolved_at >= reported_at)
+);
+
+-- A package template is a kit list for a kind of job ('Interview kit', 'Run-and-gun'): models
+-- and how many, never serial numbers. The same gear can be packed by many templates.
+CREATE TABLE package_templates (
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    notes       TEXT,
+    archived_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON package_templates (lower(name)) WHERE archived_at IS NULL;
+
+CREATE TABLE package_template_items (
+    pkid                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    package_template_id UUID NOT NULL REFERENCES package_templates(pkid),
+    model_id            UUID NOT NULL REFERENCES equipment_models(pkid),
+    quantity            INT  NOT NULL CHECK (quantity > 0),
+    archived_at         TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON package_template_items (package_template_id, model_id) WHERE archived_at IS NULL;
+
+-- A package is one crate packed for one appointment. 'Pack from template' copies the template's
+-- list into package_needs (editable afterwards; nothing links back), then real items are packed
+-- into package_items. Like a booking, a package carries a copy of its appointment's time and
+-- live flag; its own is_live also goes false when the package is archived, and that flows on to
+-- its items, so archiving a package or its appointment unpacks the gear.
+CREATE TABLE packages (
+    pkid             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    appointment_id   UUID NOT NULL REFERENCES appointments(pkid),
+    name             TEXT NOT NULL,         -- 'Crate 1: camera'
+    period           TSTZRANGE NOT NULL,
+    appointment_live BOOLEAN NOT NULL,
+    archived_at      TIMESTAMPTZ,
+    is_live          BOOLEAN GENERATED ALWAYS AS (appointment_live AND archived_at IS NULL) STORED,
+    FOREIGN KEY (appointment_id, period, appointment_live)
+        REFERENCES appointments (pkid, period, is_live) ON UPDATE CASCADE,
+    UNIQUE (pkid, period, is_live)          -- copied onto each packed item below
+);
+CREATE UNIQUE INDEX ON packages (appointment_id, lower(name)) WHERE archived_at IS NULL;
+
+CREATE TABLE package_needs (                    -- what the crate should hold, by model
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    package_id  UUID NOT NULL REFERENCES packages(pkid),
+    model_id    UUID NOT NULL REFERENCES equipment_models(pkid),
+    quantity    INT  NOT NULL CHECK (quantity > 0),
+    archived_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON package_needs (package_id, model_id) WHERE archived_at IS NULL;
+
+-- The serial-numbered pieces actually in the crate. One exclusion constraint refuses a piece in
+-- two packages at overlapping times, whichever appointments they are for; moving an appointment
+-- or reviving a package into a clash is refused too.
+CREATE TABLE package_items (
+    pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    package_id   UUID NOT NULL REFERENCES packages(pkid),
+    item_id      UUID NOT NULL REFERENCES equipment_items(pkid),
+    period       TSTZRANGE NOT NULL,
+    package_live BOOLEAN NOT NULL,
+    packed_at    TIMESTAMPTZ,               -- ticked on the checklist, on screen as it is packed;
+                                            -- who ticked it is in the audit log
+    returned_at  TIMESTAMPTZ,               -- back in stock after the job
+    archived_at  TIMESTAMPTZ,
+    FOREIGN KEY (package_id, period, package_live)
+        REFERENCES packages (pkid, period, is_live) ON UPDATE CASCADE,
+    EXCLUDE USING gist (item_id WITH =, period WITH &&)
+        WHERE (package_live AND archived_at IS NULL)         -- one time slot at a time
+);
+CREATE UNIQUE INDEX ON package_items (package_id, item_id) WHERE archived_at IS NULL;
 
 -- ===== Templates =====
 -- A template is a starting point, not real work: it has no workflow state, no publications and
@@ -984,8 +1092,14 @@ CREATE TABLE series_templates (
 );
 CREATE UNIQUE INDEX ON series_templates (calendar_id, lower(name)) WHERE archived_at IS NULL;
 
+
+```
+
+The schema continues: the no-delete guard, workflow triggers, views and indexes.
+
+```sql
 -- ===== No deletes, anywhere =====
--- A grant alone cannot stop a table owner, so this is one of the two places a trigger is used.
+-- A grant alone cannot stop a table owner, so this is one of the few places a trigger is used.
 -- The app's database login has no DELETE right on any of these tables, and this trigger
 -- refuses a delete even from a login that has one. Only a database owner deliberately
 -- disabling the trigger (for example, a legal erasure request) can remove a row.
@@ -1006,6 +1120,9 @@ BEGIN
                              'segment_assets', 'publications', 'milestones',
                              'series_cadences', 'cadence_times', 'appointments', 'resources',
                              'appointment_resources', 'crews', 'crew_members', 'appointment_people',
+                             'equipment_models', 'equipment_items', 'equipment_issues',
+                             'package_templates', 'package_template_items', 'packages',
+                             'package_needs', 'package_items',
                              'workflows', 'workflow_transitions', 'video_templates', 'segment_templates',
                              'video_template_segments', 'video_template_assets',
                              'segment_template_assets', 'milestone_templates',
@@ -1124,8 +1241,9 @@ SELECT v.calendar_id, a.video_id, 'appointment', a.pkid, a.name, a.starts_at, a.
 -- Things a person should look at: a pinned appointment that ends later than its T-minus allows
 -- (needed_before, so it also catches one left after the finish), an overdue milestone, a video
 -- still in a stage whose deadline has passed, and an asset that is not ready by the time a video
--- needs it. A person or resource booked twice cannot happen (see appointment_people and
--- appointment_resources), so it never shows here.
+-- needs it. For appointments still to come: a package holding fewer of a model than it needs,
+-- and packed gear with an open wear or damage report. A person, room or piece of gear booked
+-- twice cannot happen (see the exclusion constraints), so it never shows here.
 CREATE VIEW schedule_problems AS
 SELECT v.calendar_id, v.pkid AS video_id, 'appointment_too_late'::text AS problem,
        a.pkid AS item_id, a.name AS label, v.finish_at - a.needed_before AS at
@@ -1155,7 +1273,31 @@ SELECT v.calendar_id, v.pkid, 'asset_late', a.pkid, a.name, v.finish_at - u.need
   JOIN workflow_states ws ON ws.pkid = a.state_id
  WHERE v.archived_at IS NULL AND a.archived_at IS NULL
    AND ws.code NOT IN ('ready', 'approved', 'not_needed')
-   AND v.finish_at - u.needed_before < now();
+   AND v.finish_at - u.needed_before < now()
+UNION ALL
+SELECT v.calendar_id, v.pkid, 'package_short', pn.pkid,
+       p.name || ': ' || m.name || ' ' || count(pi.pkid) || ' of ' || pn.quantity, a.starts_at
+  FROM package_needs pn
+  JOIN packages p          ON p.pkid = pn.package_id AND p.archived_at IS NULL
+  JOIN appointments a      ON a.pkid = p.appointment_id AND a.archived_at IS NULL
+  JOIN videos v            ON v.pkid = a.video_id AND v.archived_at IS NULL
+  JOIN equipment_models m  ON m.pkid = pn.model_id
+  LEFT JOIN package_items pi ON pi.package_id = p.pkid AND pi.archived_at IS NULL
+                            AND pi.item_id IN (SELECT pkid FROM equipment_items WHERE model_id = pn.model_id)
+ WHERE pn.archived_at IS NULL AND a.ends_at > now()
+ GROUP BY v.calendar_id, v.pkid, pn.pkid, p.name, m.name, pn.quantity, a.starts_at
+HAVING count(pi.pkid) < pn.quantity
+UNION ALL
+SELECT DISTINCT v.calendar_id, v.pkid, 'gear_has_issue', i.pkid,
+       m.name || ' #' || i.asset_tag || ': ' || ei.description, a.starts_at
+  FROM equipment_issues ei
+  JOIN equipment_items i  ON i.pkid = ei.item_id
+  JOIN equipment_models m ON m.pkid = i.model_id
+  JOIN package_items pi   ON pi.item_id = i.pkid AND pi.archived_at IS NULL
+  JOIN packages p         ON p.pkid = pi.package_id AND p.archived_at IS NULL
+  JOIN appointments a     ON a.pkid = p.appointment_id AND a.archived_at IS NULL
+  JOIN videos v           ON v.pkid = a.video_id AND v.archived_at IS NULL
+ WHERE ei.resolved_at IS NULL AND ei.archived_at IS NULL AND a.ends_at > now();
 
 -- ===== Effective access, with the days each row is valid =====
 -- valid = the overlap of the user's employment, the membership or role, and the grant.
@@ -1218,6 +1360,7 @@ CREATE INDEX ON milestones        (video_id)                  WHERE archived_at 
 CREATE INDEX ON appointments      (video_id)                  WHERE archived_at IS NULL;
 CREATE INDEX ON appointment_resources (resource_id);
 CREATE INDEX ON crew_members (user_id);
+CREATE INDEX ON package_items (item_id);
 ```
 
 A typical read, listing the videos the logged-in user may see on the calendar:
@@ -1319,7 +1462,7 @@ Some things happen at a fixed time and must not move with the finish date: a sho
 - **Appointments still have a T-minus.** Each one says how long before the finish it must be over (`needed_before`), such as a shoot that must wrap 10 days before finish so editing has time. The appointment doesn't move, but its deadline does, so a finish date moved earlier can leave it too late.
 - **Crews are made of people, and people are users.** A **crew** (Crew A) is a named team; membership is dated and stays inside each person's employment, like group membership. Booking a crew onto an appointment books each person on it at that moment, so everyone can see and report on their own appointments.
 - **Nobody can be in two time slots at once.** The database refuses any booking of a person whose time overlaps another of their bookings, even when they are on two crews. That covers moving an appointment into a clash and bringing back an archived one. A person also can't be booked outside their employment, so ending someone with bookings still ahead is refused until those bookings are archived.
-- **Studios and kit are resources,** booked the same way and with the same rule. Locations don't clash: a crew can work at several locations in a day, and a location can host several shoots, even at once. Crews and resources are company-wide, because they can work for several calendars.
+- **Studios and rooms are resources,** booked the same way and with the same rule. Locations don't clash: a crew can work at several locations in a day, and a location can host several shoots, even at once. Crews and resources are company-wide, because they can work for several calendars.
 - **The problems report** (`schedule_problems`) lists what needs a person's attention: an appointment that ends later than its T-minus allows (including one now after the finish), an overdue milestone, a video still in a stage whose deadline has passed, and an asset that isn't ready when a video needs it. Each row points to its video, so someone can move the appointment, the finish date, or both.
 
 ```sql
@@ -1345,6 +1488,50 @@ SELECT a.pkid, a.name, a.starts_at, a.ends_at, a.location, a.done_at
  WHERE ap.user_id = $1 AND ap.archived_at IS NULL AND a.archived_at IS NULL
    AND a.ends_at >= $2
  ORDER BY a.starts_at;
+```
+
+### Equipment and packages
+
+Gear is tracked piece by piece, because there may be several of the same camera and each one wears out or breaks on its own.
+
+- **Models and items.** A **model** is a kind of gear (Sony FX3); an **item** is one piece of it. The system gives every item its own asset tag number to print on a labeler and stick on the gear, so nobody has to find the maker's serial number (which can still be recorded, and can't repeat within a model). Tags are never reused, even after an item is retired.
+- **Package templates are kit lists** for a kind of job, such as "Interview kit: 2 × Sony FX3, 1 × Rode NTG5". They name models, not serial numbers, so the same gear can be repacked into different packages for different kinds of work.
+- **A package is one crate for one appointment.** Packing from a template copies its list into the package's needs, which can then be changed. Then real items are packed against it. The checklist lives on screen: ticking an item as it goes in the crate records when (and the audit log records who), so anyone can see how far packing has got. It also prints for the crate: each model, how many are needed, and the asset tags packed, with a box to tick.
+- **Gear can't be in two places at once.** An item can't be in two packages whose appointments overlap in time. Moving an appointment into a clash or bringing back an archived package is refused too. Archiving a package or its appointment unpacks the gear.
+- **History and damage.** Every package an item was in stays on record, so you can see where it went, and wear or damage is logged as an issue on the item. The problems report flags a package that is short of what it needs, and packed gear with an open issue, for appointments still to come.
+
+```sql
+-- Pack from template: copy package template $2's kit list into new package $1.
+INSERT INTO package_needs (package_id, model_id, quantity)
+SELECT $1, model_id, quantity
+  FROM package_template_items
+ WHERE package_template_id = $2 AND archived_at IS NULL;
+```
+
+```sql
+-- Crate checklist for package $1, on screen or printed: each needed model with how many, then
+-- the asset tags packed against it. Gear packed beyond the list shows with needed = 0.
+SELECT m.name AS model, COALESCE(n.quantity, 0) AS needed,
+       i.asset_tag, i.nickname, pi.packed_at
+  FROM (SELECT model_id, quantity FROM package_needs WHERE package_id = $1 AND archived_at IS NULL) n
+  FULL JOIN (SELECT pi.*, i.model_id FROM package_items pi
+               JOIN equipment_items i ON i.pkid = pi.item_id
+              WHERE pi.package_id = $1 AND pi.archived_at IS NULL) pi ON pi.model_id = n.model_id
+  JOIN equipment_models m ON m.pkid = COALESCE(n.model_id, pi.model_id)
+  LEFT JOIN equipment_items i ON i.pkid = pi.item_id
+ ORDER BY m.name, i.asset_tag;
+```
+
+```sql
+-- Where has item $1 been? Its packing history, newest first, with each appointment and video.
+SELECT a.starts_at, a.ends_at, a.name AS appointment, a.location, v.working_title,
+       p.name AS package, pi.packed_at, pi.returned_at
+  FROM package_items pi
+  JOIN packages p     ON p.pkid = pi.package_id
+  JOIN appointments a ON a.pkid = p.appointment_id
+  JOIN videos v       ON v.pkid = a.video_id
+ WHERE pi.item_id = $1
+ ORDER BY a.starts_at DESC;
 ```
 
 ### Templates
@@ -1492,6 +1679,14 @@ A company tool holding unreleased content and client work needs these from the f
 | Database | App login has no DDL rights and cannot alter the audit log; backups encrypted | To set up |
 | Dependencies | `cargo audit` and `cargo deny` in CI | Not set up |
 
+## Building the screens
+
+Most screens are the same idea again and again: a list, a form to add or change a row, and an archive button. They should come from shared code, not be written by hand each time.
+
+- **Look for a crate first.** At a first look, the Rust admin crates for axum (such as `axum-admin`, `adminx` and `rustango`) are young or bring their own data layer, sign-in or JavaScript, and none of them would run our rules for us: the access check against `effective_access`, the audit transaction that sets `app.user_id`, `app.ip` and `app.request_id`, CSRF on every POST, and archive instead of delete. Worth a closer look before we write our own, but probably not a fit.
+- **Otherwise, one shared CRUD module.** A Rust trait describes a table once: its fields, labels, which lookup each foreign key picks from, its object type for access, and its `sqlx::query!` statements. Generic axum handlers then give list, view, new, edit and archive pages for any table that implements it, and shared Askama templates draw them with Pico.css, using HTMX for inline edits and for ticking checklist items. Every write goes through one helper that checks access, opens the audit transaction and handles CSRF, so no screen can skip those.
+- **Hand-written screens only where the work is special,** such as the calendar, the series wizard, the packing checklist and the problems report.
+
 ## Proposed CLAUDE.md changes
 
 Rule 4 in the repo's CLAUDE.md says every query must filter by `user_id`. Shared ownership breaks that rule, so it needs replacing before any of this is built. Proposed wording:
@@ -1547,9 +1742,10 @@ These rules come from the data model and will surprise people unless the help pa
 - **Every stage has a due time.** Each stage of a video is due a set time before its finish date, so the calendar can warn you early when a video is falling behind.
 
 * **Appointments stay put.** A booked shoot or studio slot keeps its time when the finish date moves. Give it a T-minus (for example, wrap 10 days before finish); if it ends later than that, it shows on the problems report.
-* **A crew can't be in two time slots at once.** Booking a person (directly or through a crew), studio or kit that is already booked at an overlapping time is refused, even when the person is on two crews. Archive the other booking first, or pick another time. Two shoots at the same location are fine.
+* **A crew can't be in two time slots at once.** Booking a person (directly or through a crew), a studio or a piece of gear that is already booked at an overlapping time is refused, even when the person is on two crews. Archive the other booking first, or pick another time. Two shoots at the same location are fine.
 * **My appointments.** Everyone sees their own bookings, with time and place, on one page.
 * **Ending someone with bookings ahead.** Archive or reassign their future bookings first; the database won't let a booking sit outside someone's employment.
+* **Packing for a shoot.** Pick a package template, adjust the list, then pack items by their asset tags, ticking each one off on screen as it goes in (or print the checklist for the crate). New gear gets its asset tag when it is added; print the label and stick it on. Gear already packed for an overlapping appointment is refused; log any wear or damage on the item.
 
 - **Workflows have versions.** Pick a workflow from the list when you create a video; a template usually picks it for you. Changing a workflow makes a new version. Videos already under way stay on the version they started with unless an admin moves them, and a move never changes their current stage.
 
@@ -1604,6 +1800,8 @@ Added after your notes on shared access, auditing and the calendar:
 - [ ] **Q34. Who builds and publishes workflows?** Answered: a role. Admins can give people the workflow editor role; everyone else picks from the list.
 - [ ] **Q35. Workflows per calendar?** Answered: one list for the whole company.
 
-* [ ] **Q36. Who manages crews and resources?** \[Admins, like the workflow list; it could become its own role.\]
+* [ ] **Q36. Who manages crews, rooms and equipment?** \[Admins, like the workflow list; it could become its own role.\]
 * [ ] **Q37. Warn ahead, and tell people?** The problems report shows what is already wrong. Should it also warn a few days ahead, and should it email the people involved? \[Report only, for now.\]
 * [ ] **Q38. What can crew members see?** \[Their own bookings: name, time and place. Anything more about the video needs read access to it, as usual.\]
+* [ ] **Q39. Should video templates carry appointments and kit lists,** so a new episode comes with its shoot and package templates ready? \[Not yet; add packages per appointment.\]
+* [ ] **Q40. Should gear with an open issue be blocked from packing?** \[No, just flagged on the problems report, since some wear is fine.\]
