@@ -1,4 +1,4 @@
-use my_crud_app::build_router;
+use media_calendar_manager::build_router;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]

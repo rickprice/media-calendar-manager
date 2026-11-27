@@ -3,7 +3,7 @@ use axum::{
     http::{header, Request, Response, StatusCode},
 };
 use http_body_util::BodyExt;
-use my_crud_app::build_router;
+use media_calendar_manager::build_router;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
