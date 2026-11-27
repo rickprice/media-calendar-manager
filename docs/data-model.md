@@ -24,6 +24,8 @@ These are the terms the app will use in its screens and its code. The last colum
 | Channel | One destination account on one platform, such as a YouTube channel or a Facebook Page. | `channels` |
 | Platform | The service a channel lives on: YouTube, Facebook, and later others. | `channels.platform` |
 | Series | A named, recurring run of videos with a shared format, such as a weekly show. | `series` |
+| Cadence | How often a series releases, such as weekly or monthly. Used to lay out slots. | `series.cadence` |
+| Slot | A planned episode created ahead of time from the cadence, holding its place on the calendar until its idea is filled in. A slot is an ordinary video in the Pitch stage, with a finish date that can be moved. | `videos` |
 | Video | One finished piece of content. An *episode* is a video in a series. Every video belongs to a series; loose one-off videos go in a catch-all series such as "One-offs". | `videos` |
 | Format | The shape of a video: long-form, Short/Reel, or live stream. | `videos.format` |
 | Pitch / brief | A short statement of the idea, audience and angle, written before any work starts. A pitch is not a separate kind of thing: it is a video in its first state, Pitch, and green-lighting it moves the same video on. | `videos.brief` |
@@ -226,6 +228,8 @@ CREATE TABLE workflow_state_usage (
     label       TEXT,                     -- NULL = the state's own label; e.g. 'Skipped' for publications
     sort_order  INT  NOT NULL,
     is_initial  BOOLEAN NOT NULL DEFAULT FALSE,   -- where a new row starts
+    done_before_finish INTERVAL CHECK (done_before_finish >= INTERVAL '0'),
+                        -- T-minus: leave this state this long before the finish; NULL = no deadline
     is_active   BOOLEAN NOT NULL DEFAULT TRUE,
     UNIQUE (state_id, object_type),           -- target for the per-type foreign keys below
     UNIQUE (object_type, sort_order)
@@ -343,6 +347,14 @@ SELECT t.object_type::object_type, f.pkid, d.pkid, t.label, t.sort_order
   ) AS t(object_type, from_code, to_code, label, sort_order)
   JOIN workflow_states f ON f.code = t.from_code
   JOIN workflow_states d ON d.code = t.to_code;
+
+-- First guess at each video stage's deadline, counted back from the finish (all guesses).
+UPDATE workflow_state_usage u SET done_before_finish = d.before::interval
+  FROM (VALUES ('pitch', '28 days'), ('pre_production', '14 days'), ('production', '7 days'),
+               ('post_production', '3 days'), ('in_review', '1 day'), ('ready', '0')
+       ) AS d(code, before)
+  JOIN workflow_states s ON s.code = d.code
+ WHERE u.state_id = s.pkid AND u.object_type = 'video';
 
 INSERT INTO platforms (code, label, sort_order) VALUES
     ('youtube', 'YouTube', 10), ('facebook', 'Facebook', 20), ('other', 'Other', 90);
@@ -521,6 +533,9 @@ CREATE TABLE series (
     calendar_id  UUID NOT NULL REFERENCES calendars(pkid),
     title        TEXT NOT NULL,
     description  TEXT,
+    cadence      INTERVAL CHECK (cadence > INTERVAL '0'),  -- '7 days', '14 days', '1 month';
+                                       -- NULL = no regular rhythm, e.g. 'One-offs'. Used only when
+                                       -- the app adds slots; each slot is then a video row of its own
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at  TIMESTAMPTZ,
     UNIQUE (pkid, calendar_id)
@@ -766,14 +781,16 @@ CREATE TABLE publication_templates (
 );
 CREATE UNIQUE INDEX ON publication_templates (video_template_id, channel_id) WHERE archived_at IS NULL;
 
--- A series template starts a new series (a new show or season) with its description and the
--- video template its episodes start from.
+-- A series template starts a new series (a new show or season) with its description, cadence,
+-- how many slots to create, and the video template its episodes start from.
 CREATE TABLE series_templates (
     pkid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     calendar_id       UUID NOT NULL REFERENCES calendars(pkid),
     name              TEXT NOT NULL,
     description       TEXT,
     video_template_id UUID NOT NULL REFERENCES video_templates(pkid),
+    cadence           INTERVAL CHECK (cadence > INTERVAL '0'),
+    default_slots     INT CHECK (default_slots BETWEEN 1 AND 500),  -- e.g. 10, 20 or 30 episodes
     archived_at       TIMESTAMPTZ,
     FOREIGN KEY (video_template_id, calendar_id) REFERENCES video_templates (pkid, calendar_id)
 );
@@ -858,7 +875,17 @@ SELECT p.calendar_id, p.video_id, 'go_live', p.pkid, ch.name,
   JOIN videos v    ON v.pkid = p.video_id
   JOIN channels ch ON ch.pkid = p.channel_id
   JOIN workflow_states ws ON ws.pkid = p.state_id
- WHERE p.archived_at IS NULL AND v.archived_at IS NULL AND ws.code NOT IN ('not_needed', 'removed');
+ WHERE p.archived_at IS NULL AND v.archived_at IS NULL AND ws.code NOT IN ('not_needed', 'removed')
+UNION ALL
+-- Stage deadlines: the current stage and every later one that has a T-minus.
+SELECT v.calendar_id, v.pkid, 'stage', nxt.pkid, COALESCE(nxt.label, ws.label),
+       v.finish_at - nxt.done_before_finish, NULL::timestamptz
+  FROM videos v
+  JOIN workflow_state_usage cur ON cur.state_id = v.state_id AND cur.object_type = 'video'
+  JOIN workflow_state_usage nxt ON nxt.object_type = 'video' AND nxt.sort_order >= cur.sort_order
+                               AND nxt.done_before_finish IS NOT NULL
+  JOIN workflow_states ws ON ws.pkid = nxt.state_id
+ WHERE v.archived_at IS NULL;
 
 -- ===== Effective access, with the days each row is valid =====
 -- valid = the overlap of the user's employment, the membership or role, and the grant.
@@ -972,7 +999,28 @@ Every video has one stored plan date, its **finish date** (`finish_at`, T-0): th
 - **What happened stays put.** A milestone's done time and a publication's published time are facts and never move.
 - **Even a pitch has a finish date.** It means "if we make this, when would it need to be done", which also shows how soon a decision is needed.
 
+**Stages have deadlines too.** Each video stage carries a T-minus, such as "Pre-production done 14 days before finish", so the calendar shows when every remaining step of a video is due and flags the ones running late. The deadlines live with the stages in `workflow_state_usage` (first guesses in the seed data), so changing them is an admin setting, not a code change.
+
 The open edge is fixed appointments, such as a shoot booked with a guest, which should not move when the finish date does. See Q29.
+
+### Series cadence and slots
+
+A series can have a **cadence**, such as weekly, every two weeks or monthly. When you create a series, or later, you ask for a number of **slots**, say 10, 20 or 30, and the app creates that many videos straight away: "Episode 1", "Episode 2" and so on, each in the Pitch stage with its finish date one cadence after the last. A slot is not a new kind of thing. It is an ordinary video, so it has a finish date from the start, its stages and milestones count back from it, and it shows on the calendar at once.
+
+After that the slots are just rows. Moving one episode's finish date moves only that episode and everything tied to it; the screen also offers "move this and every later episode" for when the whole run slips (guess). Changing the cadence never rewrites existing slots; it only sets the dates of slots added later. A series template can carry a cadence and a default number of slots, so a new season comes with its run already laid out.
+
+```sql
+-- Add $4 slots to series $1, using format $2, the first finishing at $3.
+INSERT INTO videos (calendar_id, series_id, episode_number, working_title,
+                    format_id, state_id, finish_at)
+SELECT s.calendar_id, s.pkid, n, 'Episode ' || n, $2,
+       (SELECT state_id FROM workflow_state_usage WHERE object_type = 'video' AND is_initial),
+       $3::timestamptz + (n - 1) * s.cadence
+  FROM series s, generate_series(1, $4::int) AS n
+ WHERE s.pkid = $1 AND s.cadence IS NOT NULL;
+```
+
+The app then adds each slot's publications, segments and milestones from the series' video template, in the same transaction.
 
 ### Templates
 
@@ -1169,6 +1217,9 @@ These rules come from the data model and will surprise people unless the help pa
 * **Dates follow the finish date.** Milestones, asset needs and go-live times are set as "so long before (or after) finish". Change a video's finish date and all of them move with it. Done and published times never move.
 * **Only allowed steps are offered.** The buttons on an item show the steps your company's workflow allows from where it is now. An admin can change the workflow.
 
+- **Slots are real episodes.** Creating a series with 20 slots creates 20 videos with dates from the cadence. Move any of them when life happens; moving one doesn't move the others unless you choose "this and every later episode".
+- **Every stage has a due time.** Each stage of a video is due a set time before its finish date, so the calendar can warn you early when a video is falling behind.
+
 ## Open questions
 
 Your answers decide the first migration. Where I had to pick, the draft uses the choice in brackets.
@@ -1213,3 +1264,6 @@ Added after your notes on shared access, auditing and the calendar:
 - [ ] **Q29. Fixed appointments.** Some dates should not move when the finish date does, such as a shoot booked with a guest. Should those be a separate kind of milestone pinned to a real date, with a warning when the finish date moves past it? \[Not yet: every milestone counts back from finish.\]
 - [ ] **Q30. One workflow, or several?** The steps now live in a table shared by the whole instance. Do some calendars or series need their own workflow, such as Shorts skipping Review? \[One workflow per type for the whole instance.\]
 - [ ] **Q31. Should a series remember its template?** A new episode could start from its series' video template automatically. \[No link: you pick a template each time; a series template only sets up the series.\]
+
+* [ ] **Q32. Stage deadlines per format?** A Short and a long-form video need very different timelines, but the draft has one set of stage deadlines for the whole instance. Should video templates (or formats) carry their own? \[One set for now; per-template deadlines are the next step.\]
+* [ ] **Q33. Cadences that one interval can't say.** "Every Tuesday and Thursday" or "first Monday of the month" don't fit a single interval. Do you need those? \[A single interval; for two a week, make two series or move slots by hand.\]
