@@ -1020,7 +1020,7 @@ SELECT s.calendar_id, s.pkid, n, 'Episode ' || n, $2,
  WHERE s.pkid = $1 AND s.cadence IS NOT NULL;
 ```
 
-The app then adds each slot's publications, segments and milestones from the series' video template, in the same transaction.
+New series are made with a wizard: pick a series template or start blank, name the series, choose the video template its episodes start from, set the cadence, the first finish date and the number of slots, then review the laid-out dates and confirm. On confirm, one transaction creates the series and every slot video, copying each slot's segments, asset links, milestones and publications from the chosen video template. That copy happens once, at creation; later edits to the template do not change the episodes, and more slots added later go through the same step.
 
 ### Templates
 
@@ -1263,7 +1263,7 @@ Added after your notes on shared access, auditing and the calendar:
 - [ ] **Q28. Editor project files on segments.** Should a segment, and a segment template, hold its Kdenlive project (or another editor's) so a new video opens with its timeline ready? It could be a large text column, or a link to a file kept next to the footage. \[Noted only; segment tables unchanged.\]
 - [ ] **Q29. Fixed appointments.** Some dates should not move when the finish date does, such as a shoot booked with a guest. Should those be a separate kind of milestone pinned to a real date, with a warning when the finish date moves past it? \[Not yet: every milestone counts back from finish.\]
 - [ ] **Q30. One workflow, or several?** The steps now live in a table shared by the whole instance. Do some calendars or series need their own workflow, such as Shorts skipping Review? \[One workflow per type for the whole instance.\]
-- [ ] **Q31. Should a series remember its template?** A new episode could start from its series' video template automatically. \[No link: you pick a template each time; a series template only sets up the series.\]
+- [ ] **Q31. Should a series remember its template?** Answered: the new-series wizard creates the episodes from a template video at creation time, and nothing links them afterwards.
 
 * [ ] **Q32. Stage deadlines per format?** A Short and a long-form video need very different timelines, but the draft has one set of stage deadlines for the whole instance. Should video templates (or formats) carry their own? \[One set for now; per-template deadlines are the next step.\]
 * [ ] **Q33. Cadences that one interval can't say.** "Every Tuesday and Thursday" or "first Monday of the month" don't fit a single interval. Do you need those? \[A single interval; for two a week, make two series or move slots by hand.\]
