@@ -55,7 +55,7 @@ fn session_cookie(response: &Response<Body>) -> Option<String> {
 
 #[sqlx::test]
 async fn root_redirects_to_login(pool: PgPool) {
-    let app = build_router(pool).await.unwrap();
+    let app = build_router(pool, false).await.unwrap();
 
     let response = app.oneshot(get("/", None)).await.unwrap();
 
@@ -65,7 +65,7 @@ async fn root_redirects_to_login(pool: PgPool) {
 
 #[sqlx::test]
 async fn dashboard_redirects_to_login_when_unauthenticated(pool: PgPool) {
-    let app = build_router(pool).await.unwrap();
+    let app = build_router(pool, false).await.unwrap();
 
     let response = app.oneshot(get("/dashboard", None)).await.unwrap();
 
@@ -75,7 +75,7 @@ async fn dashboard_redirects_to_login_when_unauthenticated(pool: PgPool) {
 
 #[sqlx::test]
 async fn register_creates_user_and_redirects_to_login(pool: PgPool) {
-    let app = build_router(pool.clone()).await.unwrap();
+    let app = build_router(pool.clone(), false).await.unwrap();
 
     let response = app
         .oneshot(post_form(
@@ -102,7 +102,7 @@ async fn register_creates_user_and_redirects_to_login(pool: PgPool) {
 
 #[sqlx::test]
 async fn register_duplicate_email_rerenders_form_with_error(pool: PgPool) {
-    let app = build_router(pool).await.unwrap();
+    let app = build_router(pool, false).await.unwrap();
 
     let first = app
         .clone()
@@ -130,7 +130,7 @@ async fn register_duplicate_email_rerenders_form_with_error(pool: PgPool) {
 
 #[sqlx::test]
 async fn login_with_wrong_password_rerenders_form_with_error(pool: PgPool) {
-    let app = build_router(pool).await.unwrap();
+    let app = build_router(pool, false).await.unwrap();
 
     app.clone()
         .oneshot(post_form(
@@ -156,7 +156,7 @@ async fn login_with_wrong_password_rerenders_form_with_error(pool: PgPool) {
 
 #[sqlx::test]
 async fn login_with_unknown_email_rerenders_form_with_error(pool: PgPool) {
-    let app = build_router(pool).await.unwrap();
+    let app = build_router(pool, false).await.unwrap();
 
     let response = app
         .oneshot(post_form(
@@ -173,7 +173,7 @@ async fn login_with_unknown_email_rerenders_form_with_error(pool: PgPool) {
 
 #[sqlx::test]
 async fn logout_without_a_session_still_redirects_to_login(pool: PgPool) {
-    let app = build_router(pool).await.unwrap();
+    let app = build_router(pool, false).await.unwrap();
 
     let response = app
         .oneshot(Request::builder()
@@ -190,7 +190,7 @@ async fn logout_without_a_session_still_redirects_to_login(pool: PgPool) {
 
 #[sqlx::test]
 async fn full_register_login_dashboard_logout_flow(pool: PgPool) {
-    let app = build_router(pool).await.unwrap();
+    let app = build_router(pool, false).await.unwrap();
 
     // Register.
     let response = app

@@ -27,11 +27,15 @@ struct DashboardTemplate {
 /// Builds the full application router: session middleware, auth middleware,
 /// and all routes. Split out from `main` so tests can exercise the router
 /// directly against a `sqlx::test`-provisioned pool.
-pub async fn build_router(pool: sqlx::PgPool) -> Result<Router, sqlx::Error> {
+///
+/// `secure_cookies` should be `true` whenever the app is served over HTTPS
+/// (production) and `false` over plain HTTP (local dev), since a `Secure`
+/// session cookie is dropped by the browser on a non-HTTPS connection.
+pub async fn build_router(pool: sqlx::PgPool, secure_cookies: bool) -> Result<Router, sqlx::Error> {
     let session_store = PostgresStore::new(pool.clone());
     session_store.migrate().await?;
 
-    let session_layer = SessionManagerLayer::new(session_store).with_secure(false);
+    let session_layer = SessionManagerLayer::new(session_store).with_secure(secure_cookies);
 
     let backend = Backend::new(pool.clone());
     let auth_layer = AuthManagerLayerBuilder::new(backend, session_layer).build();
