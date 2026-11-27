@@ -124,3 +124,101 @@ async fn logout(auth_session: AuthSession) -> Result<Response, AppError> {
     auth_session.logout().await?;
     Ok(Redirect::to("/login").into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    async fn insert_user(pool: &PgPool, email: &str, password: &str) -> Uuid {
+        let password_hash = generate_hash(password);
+
+        sqlx::query_scalar!(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+            email,
+            password_hash
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    fn creds(email: &str, password: &str) -> Credentials {
+        Credentials {
+            email: email.to_string(),
+            password: password.to_string(),
+        }
+    }
+
+    #[sqlx::test]
+    async fn authenticate_succeeds_with_correct_password(pool: PgPool) {
+        insert_user(&pool, "person@example.com", "correct-password").await;
+        let backend = Backend::new(pool);
+
+        let user = backend
+            .authenticate(creds("person@example.com", "correct-password"))
+            .await
+            .unwrap();
+
+        assert_eq!(user.unwrap().email, "person@example.com");
+    }
+
+    #[sqlx::test]
+    async fn authenticate_fails_with_wrong_password(pool: PgPool) {
+        insert_user(&pool, "person@example.com", "correct-password").await;
+        let backend = Backend::new(pool);
+
+        let user = backend
+            .authenticate(creds("person@example.com", "wrong-password"))
+            .await
+            .unwrap();
+
+        assert!(user.is_none());
+    }
+
+    #[sqlx::test]
+    async fn authenticate_fails_for_unknown_email(pool: PgPool) {
+        let backend = Backend::new(pool);
+
+        let user = backend
+            .authenticate(creds("nobody@example.com", "whatever"))
+            .await
+            .unwrap();
+
+        assert!(user.is_none());
+    }
+
+    #[sqlx::test]
+    async fn authenticate_is_case_sensitive_on_email(pool: PgPool) {
+        insert_user(&pool, "person@example.com", "correct-password").await;
+        let backend = Backend::new(pool);
+
+        let user = backend
+            .authenticate(creds("PERSON@example.com", "correct-password"))
+            .await
+            .unwrap();
+
+        assert!(user.is_none());
+    }
+
+    #[sqlx::test]
+    async fn get_user_returns_the_user_for_a_known_id(pool: PgPool) {
+        let id = insert_user(&pool, "person@example.com", "correct-password").await;
+        let backend = Backend::new(pool);
+
+        let user = backend.get_user(&id).await.unwrap().unwrap();
+
+        assert_eq!(user.id, id);
+        assert_eq!(user.email, "person@example.com");
+    }
+
+    #[sqlx::test]
+    async fn get_user_returns_none_for_an_unknown_id(pool: PgPool) {
+        let backend = Backend::new(pool);
+
+        let user = backend.get_user(&Uuid::new_v4()).await.unwrap();
+
+        assert!(user.is_none());
+    }
+}
