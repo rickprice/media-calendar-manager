@@ -4,7 +4,7 @@ Nov 27, 2026 · @Frederick Price
 
 ## Summary
 
-The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Times are stored in UTC and shown in each person's own time zone. That is 15 content tables (5 of them for templates), 7 access tables, 8 small lookup tables and 1 audit table beside the existing `users` table.
+The app runs one company's video production. Each company gets its own installation and database, so nothing can leak between companies. The company has one or more **content calendars**; each calendar holds **channels** and series; every video belongs to a **series**, breaks into **segments**, and tracks its **assets** until it is **published** on one or more platforms. People sit in **groups**, and each group gets a **role** on a whole calendar or on one channel, which sets edit, read or none for each type of object from there down. Every change and sign-in is written to an **audit log**. Each video is planned backwards from its finish date, so moving that date moves everything tied to it. Times are stored in UTC and shown in each person's own time zone. That is 18 content tables (8 of them for templates), 7 access tables, 9 small lookup tables and 1 audit table beside the existing `users` table.
 
 How to read this draft:
 
@@ -26,9 +26,10 @@ These are the terms the app will use in its screens and its code. The last colum
 | Series | A named, recurring run of videos with a shared format, such as a weekly show. | `series` |
 | Video | One finished piece of content. An *episode* is a video in a series. Every video belongs to a series; loose one-off videos go in a catch-all series such as "One-offs". | `videos` |
 | Format | The shape of a video: long-form, Short/Reel, or live stream. | `videos.format` |
-| Pitch / brief | A short statement of the idea, audience and angle, written before any work starts. | `videos.brief` |
-| Milestone | A dated checkpoint on the way to publishing, such as script done, shoot day, picture lock. | `milestones` |
-| Template | A reusable starting point for new videos: format, brief, script, the segment rundown, the assets it always uses, and milestones timed before publish. Saved from an existing video or built by hand; it can never be published itself. | `video_templates` and its child tables |
+| Pitch / brief | A short statement of the idea, audience and angle, written before any work starts. A pitch is not a separate kind of thing: it is a video in its first state, Pitch, and green-lighting it moves the same video on. | `videos.brief` |
+| Milestone | A checkpoint on the way to finishing, set as a time before the video's finish date (T-minus), such as script done 10 days before, shoot day, picture lock. It moves when the finish date moves. | `milestones` |
+| Finish date (T-0) | The moment a video must be finished and ready to publish. Every video has one, even a pitch. Milestones and asset needs count back from it (T-minus) and go-live times count forward (T-plus), so moving it moves the whole plan. | `videos.finish_at` |
+| Template | A reusable starting point. A video template holds format, brief, script, a rundown of library segments, the assets it always uses, milestones timed before finish and publishing defaults per channel. Segment templates (a standard intro, a sponsor read) and series templates work the same way. Saved from an existing item or built by hand; a template can never be published itself. | `video_templates` and its child tables |
 
 ### Structure of a video
 
@@ -84,7 +85,7 @@ These are the terms the app will use in its screens and its code. The last colum
 | Visibility | Who can see it: public, unlisted (link only) or private. | `publications.visibility` |
 | Scheduled | Set to go live at a future time. | `publications.status = scheduled` |
 | Premiere | A YouTube release that plays at a set time with live chat. | `publications.is_premiere` |
-| Go-live / publish date | The moment a publication becomes visible. Drives the calendar. | `publications.scheduled_at`, `published_at` |
+| Go-live / publish date | The moment a publication becomes visible. Planned as a time after the video's finish, so it moves with it; published\_at records when it really went live. | `videos.finish_at + publications.go_live_after`, `published_at` |
 
 ### Access and sharing
 
@@ -102,7 +103,7 @@ These are the terms the app will use in its screens and its code. The last colum
 
 ## Workflow states
 
-Each video has one **stage** that moves forward as work gets done; segments, assets and publications each have their own smaller status. The video stage is set by hand in v1 (guess): the app shows a warning, not a block, when a video moves to Ready with assets still missing.
+Each video has one **stage** that moves forward as work gets done; segments, assets and publications each have their own smaller status. Which moves are allowed is data, not code (see Steps between states below). The app shows a warning, not a block, when a video moves to Ready with assets still missing (guess).
 
 &#91;embedded content: video stages · 7 stages, 1 loop back\]
 
@@ -114,7 +115,7 @@ Videos, segments, assets and publications all follow the same plan, make, check,
 
 | Shared state | Video | Segment | Asset | Publication |
 | --- | --- | --- | --- | --- |
-| Idea | Idea (start) |  |  |  |
+| Pitch | Pitch (start) |  |  |  |
 | Planned |  | Planned (start) | Needed (start) | Draft (start) |
 | Pre-production | Pre-production | Scripted |  |  |
 | Production | Production | Recorded |  |  |
@@ -125,16 +126,20 @@ Videos, segments, assets and publications all follow the same plan, make, check,
 | Approved |  | Final | Approved |  |
 | Scheduled |  |  |  | Scheduled |
 | Published | Published |  |  | Live |
-| Not needed |  | Cut | Not needed | Skipped |
+| Not needed | Dropped | Cut | Not needed | Skipped |
 | Removed |  |  |  | Removed |
 
 Kinds and options that are not states use the same tiny-table pattern: `platforms`, `video_formats`, `segment_kinds`, `asset_kinds` and `visibilities` (public, unlisted, private), each with a code, a label, an order and `is_active`. Only `object_type` and `access_level` stay as built-in enums, because the access-check code is written against them and the order none, read, edit is what makes the comparison work.
 
+### Steps between states
+
+The workflow is data. `workflow_states` lists the states, `workflow_state_usage` says which ones each type uses, and `workflow_transitions` lists every allowed step with the button text people see ("Green-light", "Send back to edit", "Skip"). An admin can add a step, relabel it or switch it off without a code change. The screen shows only the steps allowed from where an item is now, and a small trigger makes the database refuse anything else: a new item must start in its type's first state, and each change must be a listed, active step. A pitch that is turned down moves to **Dropped**, so it stays on record and out of the way.
+
 ## Proposed Postgres schema
 
-Thirty-one tables: fifteen for content (five of them templates) with `calendars` at the top and `videos` at the centre, seven for access, eight small lookup tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar view is drawn from three dates: `publications.scheduled_at`, `milestones.due_at` and `videos.target_publish_at`.
+Thirty-five tables: eighteen for content (eight of them templates) with `calendars` at the top and `videos` at the centre, seven for access, nine small lookup tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
-**Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is just the audit log and the no-delete guard. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
+**Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard and the check that a state change follows the workflow table. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
 &#91;embedded content: tables and links · 7 tables\]
 
@@ -146,7 +151,7 @@ A publication joins a video to a channel, so one video can go out on YouTube and
 - **Archive instead.** People-facing tables have `one archived_at column; who archived a row, like who created or changed it, is only in the audit log`. Archiving is one click for anyone with `edit` on that object type, is logged, and can be undone. Archived rows vanish from normal pages; the audit view still shows them. Archiving never cascades: an archived video's segments and milestones stay as they were, simply unreachable from normal pages, and the assets it used stay in the calendar's asset library for other videos.
 - **A user is one stretch of employment.** Users have `started_at` and an optional `ended_at`, both full timestamps. Someone who leaves and comes back gets a new user; the same login name may be reused because the two periods cannot overlap.
 - **Roles are dated too.** Admin and auditor assignments, group memberships and grants each have `starts_at` and an optional `ends_at`. Dates can be edited, every edit is logged, and exclusion constraints refuse any change that would make two periods for the same thing overlap. No assignment or membership can start before the user's start date or end after their end date, and the database itself refuses it, so a coding mistake cannot open that hole. Each dated row carries a copy of the user's employment range; a composite foreign key with ON UPDATE CASCADE keeps the copy equal to the user's real dates, and a CHECK keeps the row's period inside it. Shortening a user's end date is refused while any of their roles still runs later, so the app ends those roles first in the same transaction. As a second guard, access is still intersected with the employment dates.
-- **Native constraints, not triggers.** Every foreign key references its parent's `pkid`. Where two parents must agree, such as a publication's video and channel being on the same calendar, the child also carries the shared column and a composite foreign key enforces it against a `UNIQUE (pkid, calendar_id)` on the parent. Triggers are kept only for the audit log and the no-delete guard, which constraints cannot express.
+- **Native constraints, not triggers.** Every foreign key references its parent's `pkid`. Where two parents must agree, such as a publication's video and channel being on the same calendar, the child also carries the shared column and a composite foreign key enforces it against a `UNIQUE (pkid, calendar_id)` on the parent. Triggers are kept only for the audit log, the no-delete guard and the workflow-step check, which constraints cannot express.
 - The access tree is: calendar, then series, then videos (every video is in a series), then segments, assets and milestones. Channels also sit under the calendar, and a publication joins a video to one of them. Each channel sits in exactly one calendar (guess, Q18).
 - A video publishes to every channel on its calendar by default: creating it adds a draft publication for each channel. Leaving a channel out is normal and is recorded by setting that publication to `skipped`, with an optional reason.
 - A grant gives a group a role either on a whole calendar (`calendar_grants`) or on one channel (`channel_grants`). They are separate tables, so no grant can be unclear about what it covers, and who manages a channel can change without touching the calendar's grants. A channel-only grant covers that channel and its publications (guess, Q12).
@@ -176,13 +181,16 @@ This is a sketch for review, not a migration. If you approve it, it would become
 --  * Rule one: the schema must not be able to store a state that makes no sense. Use the
 --    structure first (required links, split tables instead of optional parents, composite
 --    keys), then CHECK / UNIQUE / EXCLUDE. A trigger only when nothing else can express the
---    rule; today that is just the audit log and the no-delete guard.
+--    rule; today that is the audit log, the no-delete guard and the workflow-step check.
 --  * One database per company. Nothing here names a company: everyone in this database
 --    works for the same one, and a second company gets its own instance and database.
 --    The company's name and home time zone are instance settings, not rows.
 --  * Every date and time is TIMESTAMPTZ (stored as UTC) and shown in the viewer's own time
 --    zone; there are no DATE columns. Periods are half-open [start, end): end is the first
 --    moment the thing no longer applies, and NULL means open-ended.
+--  * Work is planned backwards from each video's finish moment (videos.finish_at, T-0).
+--    Milestones, asset needs and go-live times are stored as offsets from it, never as
+--    their own dates, so moving finish_at moves everything and nothing can fall out of step.
 --  * States and kinds live in small lookup tables; rows store the lookup's pkid.
 --  * Who created, changed or archived a row is in the audit log, not repeated in the row.
 --  * Duplicates are stopped by UNIQUE and no-overlap constraints, never by the key itself.
@@ -204,7 +212,7 @@ CREATE TYPE access_level AS ENUM ('none', 'read', 'edit');
 -- One shared set of workflow states, reused by videos, segments, assets and publications.
 CREATE TABLE workflow_states (
     pkid       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    code       TEXT NOT NULL UNIQUE,       -- 'idea', 'in_review', 'published', ...
+    code       TEXT NOT NULL UNIQUE,       -- 'pitch', 'in_review', 'published', ...
     label      TEXT NOT NULL,
     sort_order INT  NOT NULL,
     is_active  BOOLEAN NOT NULL DEFAULT TRUE
@@ -224,6 +232,23 @@ CREATE TABLE workflow_state_usage (
 );
 CREATE UNIQUE INDEX ON workflow_state_usage (object_type) WHERE is_initial;  -- one start per type
 
+-- The workflow as data: each row is one allowed step from one state to another for one type.
+-- Both ends must be states that type uses (composite keys); a step back, such as Review to
+-- Post-production, is just another row. The trigger near the end refuses any other change.
+CREATE TABLE workflow_transitions (
+    pkid          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    object_type   object_type NOT NULL,
+    from_state_id UUID NOT NULL,
+    to_state_id   UUID NOT NULL,
+    label         TEXT,                     -- button text, e.g. 'Send back to edit'
+    sort_order    INT  NOT NULL,
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    CHECK (from_state_id <> to_state_id),
+    UNIQUE (object_type, from_state_id, to_state_id),
+    FOREIGN KEY (from_state_id, object_type) REFERENCES workflow_state_usage (state_id, object_type),
+    FOREIGN KEY (to_state_id,   object_type) REFERENCES workflow_state_usage (state_id, object_type)
+);
+
 CREATE TABLE platforms (
     pkid UUID PRIMARY KEY DEFAULT gen_random_uuid(), code TEXT NOT NULL UNIQUE,
     label TEXT NOT NULL, sort_order INT NOT NULL, is_active BOOLEAN NOT NULL DEFAULT TRUE);
@@ -242,7 +267,7 @@ CREATE TABLE visibilities (
 
 -- Seed values
 INSERT INTO workflow_states (code, label, sort_order) VALUES
-    ('idea', 'Idea', 10),                 ('planned', 'Planned', 20),
+    ('pitch', 'Pitch', 10),               ('planned', 'Planned', 20),
     ('pre_production', 'Pre-production', 30), ('production', 'Production', 40),
     ('post_production', 'Post-production', 50), ('in_progress', 'In progress', 60),
     ('in_review', 'In review', 70),       ('ready', 'Ready', 80),
@@ -253,13 +278,14 @@ INSERT INTO workflow_states (code, label, sort_order) VALUES
 INSERT INTO workflow_state_usage (state_id, object_type, label, sort_order, is_initial)
 SELECT s.pkid, u.object_type::object_type, u.label, u.sort_order, u.is_initial
   FROM (VALUES
-    ('idea',            'video',       NULL,        10, TRUE),
+    ('pitch',           'video',       NULL,        10, TRUE),
     ('pre_production',  'video',       NULL,        20, FALSE),
     ('production',      'video',       NULL,        30, FALSE),
     ('post_production', 'video',       NULL,        40, FALSE),
     ('in_review',       'video',       'Review',    50, FALSE),
     ('ready',           'video',       NULL,        60, FALSE),
     ('published',       'video',       NULL,        70, FALSE),
+    ('not_needed',      'video',       'Dropped',   80, FALSE),
     ('planned',         'segment',     NULL,        10, TRUE),
     ('pre_production',  'segment',     'Scripted',  20, FALSE),
     ('production',      'segment',     'Recorded',  30, FALSE),
@@ -278,6 +304,45 @@ SELECT s.pkid, u.object_type::object_type, u.label, u.sort_order, u.is_initial
     ('removed',         'publication', NULL,        50, FALSE)
   ) AS u(code, object_type, label, sort_order, is_initial)
   JOIN workflow_states s ON s.code = u.code;
+
+-- First guess at the allowed steps; admins can add, relabel or switch them off later.
+INSERT INTO workflow_transitions (object_type, from_state_id, to_state_id, label, sort_order)
+SELECT t.object_type::object_type, f.pkid, d.pkid, t.label, t.sort_order
+  FROM (VALUES
+    ('video', 'pitch', 'pre_production', 'Green-light', 10),
+    ('video', 'pitch', 'not_needed', 'Drop', 20),
+    ('video', 'pre_production', 'production', NULL, 30),
+    ('video', 'pre_production', 'not_needed', 'Drop', 40),
+    ('video', 'production', 'post_production', NULL, 50),
+    ('video', 'post_production', 'in_review', 'Send for review', 60),
+    ('video', 'in_review', 'post_production', 'Send back to edit', 70),
+    ('video', 'in_review', 'ready', 'Approve', 80),
+    ('video', 'ready', 'published', NULL, 90),
+    ('segment', 'planned', 'pre_production', NULL, 10),
+    ('segment', 'pre_production', 'production', NULL, 20),
+    ('segment', 'production', 'post_production', NULL, 30),
+    ('segment', 'post_production', 'approved', NULL, 40),
+    ('segment', 'approved', 'post_production', 'Re-edit', 50),
+    ('segment', 'planned', 'not_needed', 'Cut', 60),
+    ('segment', 'pre_production', 'not_needed', 'Cut', 70),
+    ('segment', 'production', 'not_needed', 'Cut', 80),
+    ('segment', 'post_production', 'not_needed', 'Cut', 90),
+    ('asset', 'planned', 'in_progress', NULL, 10),
+    ('asset', 'planned', 'ready', 'Already have it', 20),
+    ('asset', 'in_progress', 'ready', NULL, 30),
+    ('asset', 'ready', 'approved', 'Approve', 40),
+    ('asset', 'ready', 'in_progress', 'Needs changes', 50),
+    ('asset', 'planned', 'not_needed', NULL, 60),
+    ('asset', 'in_progress', 'not_needed', NULL, 70),
+    ('publication', 'planned', 'scheduled', NULL, 10),
+    ('publication', 'scheduled', 'planned', 'Unschedule', 20),
+    ('publication', 'scheduled', 'published', 'Went live', 30),
+    ('publication', 'published', 'removed', 'Taken down', 40),
+    ('publication', 'planned', 'not_needed', 'Skip', 50),
+    ('publication', 'not_needed', 'planned', 'Un-skip', 60)
+  ) AS t(object_type, from_code, to_code, label, sort_order)
+  JOIN workflow_states f ON f.code = t.from_code
+  JOIN workflow_states d ON d.code = t.to_code;
 
 INSERT INTO platforms (code, label, sort_order) VALUES
     ('youtube', 'YouTube', 10), ('facebook', 'Facebook', 20), ('other', 'Other', 90);
@@ -474,9 +539,10 @@ CREATE TABLE videos (
     format_id         UUID NOT NULL REFERENCES video_formats(pkid),
     state_id          UUID NOT NULL REFERENCES workflow_states(pkid),
     state_scope       object_type NOT NULL DEFAULT 'video' CHECK (state_scope = 'video'),
-    brief             TEXT,
+    brief             TEXT,                -- the pitch; a pitch is a video in the 'Pitch' state
     script            TEXT,
-    target_publish_at TIMESTAMPTZ,
+    finish_at         TIMESTAMPTZ NOT NULL,  -- T-0: when it must be finished, ready to publish.
+                                         -- For a pitch, when it would need to be finished.
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at       TIMESTAMPTZ,
@@ -517,7 +583,7 @@ CREATE TABLE assets (
     state_id           UUID NOT NULL REFERENCES workflow_states(pkid),
     state_scope        object_type NOT NULL DEFAULT 'asset' CHECK (state_scope = 'asset'),
     location           TEXT,               -- URL or file path; the app stores no files (Q6)
-    due_at             TIMESTAMPTZ,
+                                           -- no due date here: each use says when it is needed
     notes              TEXT,
     license_source     TEXT,               -- rights, guess (Q5)
     license_terms      TEXT,
@@ -537,6 +603,8 @@ CREATE TABLE video_assets (
     video_id    UUID NOT NULL REFERENCES videos(pkid),
     asset_id    UUID NOT NULL REFERENCES assets(pkid),
     notes       TEXT,                     -- e.g. 'YouTube thumbnail only'
+    needed_before INTERVAL NOT NULL DEFAULT INTERVAL '0' CHECK (needed_before >= INTERVAL '0'),
+                                          -- T-minus: needed this long before the video's finish
     archived_at TIMESTAMPTZ,              -- un-linking an asset from a video
     FOREIGN KEY (video_id, calendar_id) REFERENCES videos (pkid, calendar_id),     -- video and asset
     FOREIGN KEY (asset_id, calendar_id) REFERENCES assets (pkid, calendar_id)      -- share a calendar
@@ -549,6 +617,7 @@ CREATE TABLE segment_assets (
     segment_id  UUID NOT NULL REFERENCES segments(pkid),
     asset_id    UUID NOT NULL REFERENCES assets(pkid),
     notes       TEXT,                     -- e.g. 'only the first 10 seconds'
+    needed_before INTERVAL NOT NULL DEFAULT INTERVAL '0' CHECK (needed_before >= INTERVAL '0'),
     archived_at TIMESTAMPTZ,
     FOREIGN KEY (segment_id, calendar_id) REFERENCES segments (pkid, calendar_id), -- segment and asset
     FOREIGN KEY (asset_id, calendar_id)   REFERENCES assets (pkid, calendar_id)    -- share a calendar
@@ -570,9 +639,10 @@ CREATE TABLE publications (
     title         TEXT,                    -- NULL = use the video's title
     description   TEXT,
     tags          TEXT[] NOT NULL DEFAULT '{}',
-    scheduled_at  TIMESTAMPTZ,             -- each channel can go live at its own time; required by
-                                           -- the app before a row moves to 'Scheduled'
-    published_at  TIMESTAMPTZ,
+    go_live_after INTERVAL NOT NULL DEFAULT INTERVAL '0' CHECK (go_live_after >= INTERVAL '0'),
+                                           -- T-plus: each channel goes live this long after the
+                                           -- video's finish, so it moves when finish_at moves
+    published_at  TIMESTAMPTZ,             -- what actually happened; fixed once set
     platform_url  TEXT,
     archived_at   TIMESTAMPTZ,
     UNIQUE (video_id, channel_id),          -- one publication per video per channel
@@ -585,18 +655,19 @@ CREATE TABLE milestones (
     pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     video_id     UUID NOT NULL REFERENCES videos(pkid),
     name         TEXT NOT NULL,            -- 'Shoot day', 'Picture lock', ...
-    due_at       TIMESTAMPTZ NOT NULL,
-    done_at      TIMESTAMPTZ,
+    before_finish INTERVAL NOT NULL CHECK (before_finish >= INTERVAL '0'),  -- T-minus; due moment
+                                           -- = videos.finish_at - before_finish (see calendar_entries)
+    done_at      TIMESTAMPTZ,              -- what actually happened; fixed once set
     archived_at  TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX ON milestones (video_id, lower(name)) WHERE archived_at IS NULL;
 
 -- ===== Templates =====
--- A template is a starting point, not a video: it has no publications, no dates of its own and no
--- workflow state, so it can never be scheduled or published by mistake. Separate tables keep it
--- that way. 'Save as template' copies a video's segments, asset links and milestones in here;
--- 'New video from template' copies them back out into a fresh video. Nothing links the two
--- afterwards (the audit log records which template a video came from).
+-- A template is a starting point, not real work: it has no workflow state, no publications and
+-- no dates, only offsets, so it can never be scheduled or published by mistake. Separate tables
+-- keep it that way. 'Save as template' copies a video's rundown, asset links, milestones and
+-- publication settings in here; 'New video from template' copies them back out into a fresh
+-- video. Nothing links the two afterwards (the audit log records which template was used).
 CREATE TABLE video_templates (
     pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     calendar_id  UUID NOT NULL REFERENCES calendars(pkid),
@@ -610,18 +681,31 @@ CREATE TABLE video_templates (
 );
 CREATE UNIQUE INDEX ON video_templates (calendar_id, lower(name)) WHERE archived_at IS NULL;
 
+-- A segment template stands on its own in the calendar's segment library ('Standard intro',
+-- 'Sponsor read'), so it can be dropped into any video or used in any video template's rundown.
 CREATE TABLE segment_templates (
-    pkid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    calendar_id       UUID NOT NULL REFERENCES calendars(pkid),
-    video_template_id UUID NOT NULL REFERENCES video_templates(pkid),
-    position          INT  NOT NULL,
-    kind_id           UUID NOT NULL REFERENCES segment_kinds(pkid),
-    title             TEXT NOT NULL,
-    script            TEXT,
-    planned_seconds   INT CHECK (planned_seconds >= 0),
-    archived_at       TIMESTAMPTZ,
-    UNIQUE (pkid, calendar_id),
-    FOREIGN KEY (video_template_id, calendar_id) REFERENCES video_templates (pkid, calendar_id),
+    pkid            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    calendar_id     UUID NOT NULL REFERENCES calendars(pkid),
+    name            TEXT NOT NULL,
+    kind_id         UUID NOT NULL REFERENCES segment_kinds(pkid),
+    title           TEXT NOT NULL,           -- copied into the new segment
+    script          TEXT,
+    planned_seconds INT CHECK (planned_seconds >= 0),
+    archived_at     TIMESTAMPTZ,
+    UNIQUE (pkid, calendar_id)
+);
+CREATE UNIQUE INDEX ON segment_templates (calendar_id, lower(name)) WHERE archived_at IS NULL;
+
+-- A video template's rundown: library segments in order.
+CREATE TABLE video_template_segments (
+    pkid                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    calendar_id         UUID NOT NULL REFERENCES calendars(pkid),
+    video_template_id   UUID NOT NULL REFERENCES video_templates(pkid),
+    segment_template_id UUID NOT NULL REFERENCES segment_templates(pkid),
+    position            INT  NOT NULL,
+    archived_at         TIMESTAMPTZ,
+    FOREIGN KEY (video_template_id, calendar_id)   REFERENCES video_templates (pkid, calendar_id),
+    FOREIGN KEY (segment_template_id, calendar_id) REFERENCES segment_templates (pkid, calendar_id),
     EXCLUDE (video_template_id WITH =, position WITH =) WHERE (archived_at IS NULL)
         DEFERRABLE INITIALLY DEFERRED
 );
@@ -632,34 +716,68 @@ CREATE TABLE video_template_assets (            -- assets the whole video always
     video_template_id UUID NOT NULL REFERENCES video_templates(pkid),
     asset_id          UUID NOT NULL REFERENCES assets(pkid),
     notes             TEXT,
+    needed_before     INTERVAL NOT NULL DEFAULT INTERVAL '0' CHECK (needed_before >= INTERVAL '0'),
     archived_at       TIMESTAMPTZ,
     FOREIGN KEY (video_template_id, calendar_id) REFERENCES video_templates (pkid, calendar_id),
     FOREIGN KEY (asset_id, calendar_id)          REFERENCES assets (pkid, calendar_id)
 );
 CREATE UNIQUE INDEX ON video_template_assets (video_template_id, asset_id) WHERE archived_at IS NULL;
 
-CREATE TABLE segment_template_assets (          -- e.g. the intro segment always uses the intro music
+CREATE TABLE segment_template_assets (          -- e.g. the standard intro always uses the intro music
     pkid                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     calendar_id         UUID NOT NULL REFERENCES calendars(pkid),
     segment_template_id UUID NOT NULL REFERENCES segment_templates(pkid),
     asset_id            UUID NOT NULL REFERENCES assets(pkid),
     notes               TEXT,
+    needed_before       INTERVAL NOT NULL DEFAULT INTERVAL '0' CHECK (needed_before >= INTERVAL '0'),
     archived_at         TIMESTAMPTZ,
     FOREIGN KEY (segment_template_id, calendar_id) REFERENCES segment_templates (pkid, calendar_id),
     FOREIGN KEY (asset_id, calendar_id)            REFERENCES assets (pkid, calendar_id)
 );
 CREATE UNIQUE INDEX ON segment_template_assets (segment_template_id, asset_id) WHERE archived_at IS NULL;
 
--- Milestones are stored as a time before the video's target publish moment, so 'Thumbnail
--- ready 2 days 4 hours before' becomes a real due_at once a video from this template has a date.
+-- Milestones are T-minus offsets, exactly as on real videos: 'Thumbnail ready, 2 days 4 hours
+-- before finish'.
 CREATE TABLE milestone_templates (
     pkid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     video_template_id UUID NOT NULL REFERENCES video_templates(pkid),
     name              TEXT NOT NULL,
-    before_publish    INTERVAL NOT NULL CHECK (before_publish >= INTERVAL '0'),
+    before_finish     INTERVAL NOT NULL CHECK (before_finish >= INTERVAL '0'),
     archived_at       TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX ON milestone_templates (video_template_id, lower(name)) WHERE archived_at IS NULL;
+
+-- Publishing defaults: one row per channel the new video should go to, with its go-live offset,
+-- visibility and text. A channel with no row starts as 'Skipped' on the new video.
+CREATE TABLE publication_templates (
+    pkid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    calendar_id       UUID NOT NULL REFERENCES calendars(pkid),
+    video_template_id UUID NOT NULL REFERENCES video_templates(pkid),
+    channel_id        UUID NOT NULL REFERENCES channels(pkid),
+    go_live_after     INTERVAL NOT NULL DEFAULT INTERVAL '0' CHECK (go_live_after >= INTERVAL '0'),
+    visibility_id     UUID NOT NULL REFERENCES visibilities(pkid),
+    is_premiere       BOOLEAN NOT NULL DEFAULT FALSE,
+    title             TEXT,                  -- NULL = use the video's title
+    description       TEXT,                  -- e.g. the standard links-and-credits footer
+    tags              TEXT[] NOT NULL DEFAULT '{}',
+    archived_at       TIMESTAMPTZ,
+    FOREIGN KEY (video_template_id, calendar_id) REFERENCES video_templates (pkid, calendar_id),
+    FOREIGN KEY (channel_id, calendar_id)        REFERENCES channels (pkid, calendar_id)
+);
+CREATE UNIQUE INDEX ON publication_templates (video_template_id, channel_id) WHERE archived_at IS NULL;
+
+-- A series template starts a new series (a new show or season) with its description and the
+-- video template its episodes start from.
+CREATE TABLE series_templates (
+    pkid              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    calendar_id       UUID NOT NULL REFERENCES calendars(pkid),
+    name              TEXT NOT NULL,
+    description       TEXT,
+    video_template_id UUID NOT NULL REFERENCES video_templates(pkid),
+    archived_at       TIMESTAMPTZ,
+    FOREIGN KEY (video_template_id, calendar_id) REFERENCES video_templates (pkid, calendar_id)
+);
+CREATE UNIQUE INDEX ON series_templates (calendar_id, lower(name)) WHERE archived_at IS NULL;
 
 -- ===== No deletes, anywhere =====
 -- A grant alone cannot stop a table owner, so this is one of the two places a trigger is used.
@@ -681,12 +799,66 @@ BEGIN
                              'calendars', 'channels', 'calendar_grants', 'channel_grants',
                              'series', 'videos', 'segments', 'assets', 'video_assets',
                              'segment_assets', 'publications', 'milestones',
-                             'video_templates', 'segment_templates', 'video_template_assets',
-                             'segment_template_assets', 'milestone_templates'] LOOP
+                             'workflow_transitions', 'video_templates', 'segment_templates',
+                             'video_template_segments', 'video_template_assets',
+                             'segment_template_assets', 'milestone_templates',
+                             'publication_templates', 'series_templates'] LOOP
         EXECUTE format('CREATE TRIGGER no_delete BEFORE DELETE ON %I
                         FOR EACH ROW EXECUTE FUNCTION forbid_delete()', t);
     END LOOP;
 END $$;
+
+-- ===== Workflow steps follow the table =====
+-- A foreign key cannot compare a row's old and new state, so this is the third trigger.
+-- A new row must start in its type's initial state; a change must be an active step in
+-- workflow_transitions. The app shows only those steps as buttons, so normally this never fires.
+CREATE FUNCTION check_workflow_step() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NOT EXISTS (SELECT 1 FROM workflow_state_usage
+                        WHERE object_type = NEW.state_scope AND state_id = NEW.state_id AND is_initial) THEN
+            RAISE EXCEPTION 'a new % must start in its initial state', NEW.state_scope;
+        END IF;
+    ELSIF NEW.state_id IS DISTINCT FROM OLD.state_id THEN
+        IF NOT EXISTS (SELECT 1 FROM workflow_transitions
+                        WHERE object_type = NEW.state_scope AND from_state_id = OLD.state_id
+                          AND to_state_id = NEW.state_id AND is_active) THEN
+            RAISE EXCEPTION 'that % cannot move from its current state to the one asked for', NEW.state_scope;
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$;
+
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['videos', 'segments', 'assets', 'publications'] LOOP
+        EXECUTE format('CREATE TRIGGER workflow_step BEFORE INSERT OR UPDATE OF state_id ON %I
+                        FOR EACH ROW EXECUTE FUNCTION check_workflow_step()', t);
+    END LOOP;
+END $$;
+
+-- ===== Calendar dates, worked out from each video's finish =====
+-- The only stored plan date is videos.finish_at; everything else is computed here, so it
+-- always agrees with it. Done and published moments are facts and win when present.
+CREATE VIEW calendar_entries AS
+SELECT v.calendar_id, v.pkid AS video_id, 'finish'::text AS kind, NULL::uuid AS item_id,
+       v.working_title AS label, v.finish_at AS due_at, NULL::timestamptz AS done_at
+  FROM videos v
+ WHERE v.archived_at IS NULL
+UNION ALL
+SELECT v.calendar_id, v.pkid, 'milestone', m.pkid, m.name,
+       v.finish_at - m.before_finish, m.done_at
+  FROM milestones m JOIN videos v ON v.pkid = m.video_id
+ WHERE m.archived_at IS NULL AND v.archived_at IS NULL
+UNION ALL
+SELECT p.calendar_id, p.video_id, 'go_live', p.pkid, ch.name,
+       v.finish_at + p.go_live_after, p.published_at
+  FROM publications p
+  JOIN videos v    ON v.pkid = p.video_id
+  JOIN channels ch ON ch.pkid = p.channel_id
+  JOIN workflow_states ws ON ws.pkid = p.state_id
+ WHERE p.archived_at IS NULL AND v.archived_at IS NULL AND ws.code NOT IN ('not_needed', 'removed');
 
 -- ===== Effective access, with the days each row is valid =====
 -- valid = the overlap of the user's employment, the membership or role, and the grant.
@@ -737,19 +909,20 @@ CREATE INDEX ON calendar_grants   (calendar_id);
 CREATE INDEX ON channel_grants    (group_id);
 CREATE INDEX ON channel_grants    (channel_id);
 CREATE INDEX ON videos            (calendar_id, state_id)     WHERE archived_at IS NULL;
+CREATE INDEX ON videos            (calendar_id, finish_at)    WHERE archived_at IS NULL;
 CREATE INDEX ON segments          (video_id)                  WHERE archived_at IS NULL;
 CREATE INDEX ON assets            (calendar_id, state_id)     WHERE archived_at IS NULL;
 CREATE INDEX ON video_assets      (asset_id);                 -- 'what uses this asset?'
 CREATE INDEX ON segment_assets    (asset_id);
 CREATE INDEX ON publications      (channel_id, state_id)      WHERE archived_at IS NULL;
-CREATE INDEX ON publications      (calendar_id, scheduled_at) WHERE archived_at IS NULL;
-CREATE INDEX ON milestones        (due_at)                    WHERE archived_at IS NULL;
+CREATE INDEX ON publications      (video_id);
+CREATE INDEX ON milestones        (video_id)                  WHERE archived_at IS NULL;
 ```
 
 A typical read, listing the videos the logged-in user may see on the calendar:
 
 ```sql
-SELECT v.pkid, v.working_title, v.state_id, v.target_publish_at
+SELECT v.pkid, v.working_title, v.state_id, v.finish_at
   FROM videos v
  WHERE v.calendar_id = $1
    AND v.archived_at IS NULL                     -- normal pages skip archived rows
@@ -764,10 +937,11 @@ SELECT v.pkid, v.working_title, v.state_id, v.target_publish_at
 
 ### Report: what uses this asset?
 
-Because videos share assets, the asset page will have a **Where used** report (planned, not v1 unless you want it). It lists every video, and the segment if one is named, that uses the asset, with the video's stage and target date. Archived uses are hidden unless the viewer ticks "include archived", which is how someone can check whether a logo or a licensed track is still in use before replacing it or letting the licence lapse. The index on `video_assets (asset_id)` makes this a quick lookup, and the same calendar access check as every other page applies.
+Because videos share assets, the asset page will have a **Where used** report (planned, not v1 unless you want it). It lists every video, and the segment if one is named, that uses the asset, with the video's stage and when the asset is needed for it. Archived uses are hidden unless the viewer ticks "include archived", which is how someone can check whether a logo or a licensed track is still in use before replacing it or letting the licence lapse. The index on `video_assets (asset_id)` makes this a quick lookup, and the same calendar access check as every other page applies.
 
 ```sql
-SELECT v.pkid AS video_id, v.working_title, NULL AS segment, va.notes, v.target_publish_at,
+SELECT v.pkid AS video_id, v.working_title, NULL AS segment, va.notes,
+       v.finish_at - va.needed_before AS needed_by,
        (va.archived_at IS NOT NULL OR v.archived_at IS NOT NULL) AS archived
   FROM video_assets va
   JOIN videos v ON v.pkid = va.video_id
@@ -775,7 +949,8 @@ SELECT v.pkid AS video_id, v.working_title, NULL AS segment, va.notes, v.target_
    AND va.calendar_id = ANY($2)          -- calendars the user may read videos in, right now
    AND ($3 OR (va.archived_at IS NULL AND v.archived_at IS NULL))   -- $3 = include archived
 UNION ALL
-SELECT v.pkid, v.working_title, s.title, sa.notes, v.target_publish_at,
+SELECT v.pkid, v.working_title, s.title, sa.notes,
+       v.finish_at - sa.needed_before,
        (sa.archived_at IS NOT NULL OR s.archived_at IS NOT NULL OR v.archived_at IS NOT NULL)
   FROM segment_assets sa
   JOIN segments s ON s.pkid = sa.segment_id
@@ -783,20 +958,37 @@ SELECT v.pkid, v.working_title, s.title, sa.notes, v.target_publish_at,
  WHERE sa.asset_id = $1
    AND sa.calendar_id = ANY($2)
    AND ($3 OR (sa.archived_at IS NULL AND s.archived_at IS NULL AND v.archived_at IS NULL))
- ORDER BY target_publish_at NULLS LAST, working_title;
+ ORDER BY needed_by, working_title;
 ```
+
+### Planning backwards from the finish date
+
+Every video has one stored plan date, its **finish date** (`finish_at`, T-0): the moment it must be finished and ready to publish. Everything else on the calendar is counted from it.
+
+- **Milestones count back.** A milestone stores how long before finish it is due, such as "Script locked, 10 days before". Its date on screen is the finish date minus that.
+- **Assets count back from each use.** A video or segment that uses an asset says how long before finish it needs it. An asset shared by several videos is needed by the earliest of those moments, which the Where used report shows.
+- **Go-live counts forward.** Each publication stores how long after finish it goes live on its channel, so YouTube can go out at finish and Facebook a day later.
+- **Move the finish date and everything moves.** No other plan date is stored, so nothing can be left behind. The `calendar_entries` view works out the dates for the calendar.
+- **What happened stays put.** A milestone's done time and a publication's published time are facts and never move.
+- **Even a pitch has a finish date.** It means "if we make this, when would it need to be done", which also shows how soon a decision is needed.
+
+The open edge is fixed appointments, such as a shoot booked with a guest, which should not move when the finish date does. See Q29.
 
 ### Templates
 
-Videos are often made to the same pattern, so a calendar can keep **templates**. A template holds what a new video should start with: format, brief and script, the segment rundown, the assets the video and each segment always use, and milestones such as "Thumbnail ready, 2 days before publish".
+Work is often made to the same pattern, so a calendar keeps **templates** for the things made most often: videos, segments, series and publishing settings.
 
-- **Save as template.** From any video, the app copies its segments, asset links and milestones into a new template. Milestone due times become offsets before the video's target publish time.
-- **New video from template.** The app copies everything back into a fresh video, adds a draft publication for each channel as usual, and turns the offsets into real due times once the video has a target publish time.
+- **Video templates** hold format, brief and script, a rundown of library segments, the assets the video always uses, milestones timed before finish and publishing defaults.
+- **Segment templates** sit on their own in the calendar's segment library ("Standard intro", "Sponsor read"). You can drop one into any video, and video templates build their rundown from them. Each carries its script, running time and the assets it always uses.
+- **Publishing defaults** are part of a video template: one row per channel the video should go to, with how long after finish it goes live, its visibility, and standard title, description and tags. Channels left out start as Skipped.
+- **Series templates** start a new show or season with its description and the video template its episodes start from.
+- **Save as template.** From any video, the app copies its segments, asset links, milestones and publications into a new template. Dates are already offsets from the finish date, so nothing needs converting.
+- **New video from template.** You give the new video a finish date, and the app copies everything in, with every date counted from it.
 - **No link afterwards.** Editing a template never changes videos already made from it. The audit log records which template a video started from.
-- **Can't be published by mistake.** Templates live in their own tables with no publications, dates or workflow state, so the database cannot schedule one.
-- **Access.** Templates belong to a calendar and use a new `template` object type, so a role can let someone use templates without letting them edit them.
+- **Can't be published by mistake.** Templates live in their own tables with no workflow state or publications, so the database cannot schedule one.
+- **Access.** Templates belong to a calendar and use the `template` object type, so a role can let someone use templates without letting them edit them.
 
-The same pattern can be added for anything else created often. See Q27.
+**Editor project files (a note only, not in the schema yet).** A segment, and a segment template, could later carry the editing project for that part of the video, such as a Kdenlive project (a .kdenlive XML file), in a large text column, so a new video starts with its timeline already set up. The segment tables are unchanged for now. See Q28.
 
 ### Can this user do this, right now?
 
@@ -973,6 +1165,10 @@ These rules come from the data model and will surprise people unless the help pa
 - **People who return get a new account.** A returning employee gets a new user, and may get their old login name back. Their earlier history stays with their old user.
 - **Times are shown in your own time zone.** Your admin sets a starting zone when creating your account; change it any time under your settings. Every date has a time too, so a due date can be 8:00 AM on the day something must be ready, and it appears in your own zone.
 
+* **A pitch is just a video at its first stage.** Write the brief, give it a rough finish date, and green-light it when it is approved; it keeps all its history. A turned-down pitch moves to Dropped.
+* **Dates follow the finish date.** Milestones, asset needs and go-live times are set as "so long before (or after) finish". Change a video's finish date and all of them move with it. Done and published times never move.
+* **Only allowed steps are offered.** The buttons on an item show the steps your company's workflow allows from where it is now. An admin can change the workflow.
+
 ## Open questions
 
 Your answers decide the first migration. Where I had to pick, the draft uses the choice in brackets.
@@ -985,7 +1181,7 @@ Your answers decide the first migration. Where I had to pick, the draft uses the
 - [ ] **Q6. Where do files live?** Should the app hold uploaded files, or only link to Drive, Dropbox or a local path? \[Links only.\]
 - [ ] **Q7. Sync with YouTube and Facebook?** Should the app later read or push schedules through the platforms' APIs, or is manual entry fine? \[Manual entry; `platform_url` is stored for later.\]
 - [ ] **Q8. Dependencies between milestones?** Do you need "B-roll shoot must finish before picture lock" rules, or just dated checkpoints? \[Dated checkpoints only.\]
-- [ ] **Q9. Do the seven stages match how you work?** States now live in a lookup table, so they can be renamed, added or switched off later without a code change; the shared-state map above is a first guess at the names.
+- [ ] **Q9. Do the seven stages match how you work?** States now live in a lookup table, so they can be renamed, added or switched off later without a code change; the shared-state map above is a first guess at the names. The allowed steps between them are a first guess too, and also live in a table.
 
 Added after your notes on shared access, auditing and the calendar:
 
@@ -1011,4 +1207,9 @@ Added after your notes on shared access, auditing and the calendar:
 
 - [ ] **Q26. Password expiry.** Answered: no expiry. Strong passwords are enforced instead (see Passwords).
 
-* [ ] **Q27. What else needs templates?** Video templates are in the draft. Candidates: a standalone segment you drop into any video (a sponsor read), a series template (a new season with its videos), or publication defaults per channel (description footer, tags). Which of these do you create often enough to want templates? \[Video templates only in v1; segments next.\]
+* [ ] **Q27. What else needs templates?** Answered: videos, segments, series and publishing defaults. All four are in the draft.
+
+- [ ] **Q28. Editor project files on segments.** Should a segment, and a segment template, hold its Kdenlive project (or another editor's) so a new video opens with its timeline ready? It could be a large text column, or a link to a file kept next to the footage. \[Noted only; segment tables unchanged.\]
+- [ ] **Q29. Fixed appointments.** Some dates should not move when the finish date does, such as a shoot booked with a guest. Should those be a separate kind of milestone pinned to a real date, with a warning when the finish date moves past it? \[Not yet: every milestone counts back from finish.\]
+- [ ] **Q30. One workflow, or several?** The steps now live in a table shared by the whole instance. Do some calendars or series need their own workflow, such as Shorts skipping Review? \[One workflow per type for the whole instance.\]
+- [ ] **Q31. Should a series remember its template?** A new episode could start from its series' video template automatically. \[No link: you pick a template each time; a series template only sets up the series.\]
