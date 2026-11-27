@@ -33,10 +33,10 @@ These are the terms the app will use in its screens and its code. The last colum
 | Appointment | Something booked at a fixed time, such as a shoot with a guest or a studio slot. Unlike a milestone it stays put when the finish date moves, but it has a T-minus: how long before the finish it must be over. | `appointments` |
 | Resource | A studio or room that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
 | Crew | A named team of users, such as Crew A. Booking a crew books each person on it, so people see their own appointments (a crew lead sees the whole crew's), and nobody can be in two overlapping time slots even if they are on two crews. | `crews, crew_members, appointment_people` |
-| Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. Each item moves through a workflow: Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair, Missing. | `equipment_models, equipment_items, equipment_issues` |
+| Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. Each item moves through a workflow: Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair, Missing. Every model has a kind (crate, case or bag, gear, accessory, consumable): pieces sit inside or attach to others (a battery on a camera, the camera in its bag, the bag in a crate), and consumables such as AA batteries are counted, not tagged. | `equipment_kinds, equipment_models, equipment_items, equipment_contents, equipment_issues` |
 | Package template | A kit list for a kind of job, such as Interview kit: models and how many, never serial numbers. Video templates can bring kits along. The same gear can be packed by many templates. | `package_templates, package_template_items` |
-| Package | One crate packed for one appointment: what it needs (copied from a template) and the tagged items actually in it. Ticked off on screen as it is packed, and prints as a checklist. An item can't be in two packages at overlapping times. | `packages, package_needs, package_items` |
-| Kit | A real, persistent crate (Interview kit A) that keeps its gear between jobs and names the kit list it should hold. An item is in one kit at a time. Booking a kit packs its current items for an appointment. | `kits, kit_items, kit_bookings` |
+| Package | One crate packed for one appointment: what it needs (copied from a template) and the tagged items and counted consumables actually in it. Ticked off on screen as it is packed, and prints as a checklist. An item can't be in two packages at overlapping times. | `packages, package_needs, package_items`, package\_supplies |
+| Kit | A real, persistent crate (Interview kit A) that keeps its gear between jobs and names the kit list it should hold. The crate is itself a tagged item, and the kit is whatever is inside it now. Booking a kit packs the crate and everything in it for an appointment. | `kits, kit_bookings` |
 | Finish date (T-0) | The moment a video must be finished and ready to publish. Every video has one, even a pitch. Milestones and asset needs count back from it (T-minus) and go-live times count forward (T-plus), so moving it moves the whole plan. | `videos.finish_at` |
 | Template | A reusable starting point. A video template holds format, brief, script, a rundown of library segments, the assets it always uses, milestones timed before finish and publishing defaults per channel. Segment templates (a standard intro, a sponsor read) and series templates work the same way. Saved from an existing item or built by hand; a template can never be published itself. | `video_templates` and its child tables |
 | Workflow | A named, versioned set of stages, deadlines and allowed steps for one type of item, such as Standard or Short. Picked from a list when an item is created. A published version never changes; a change is a new version. | `workflows` |
@@ -154,7 +154,7 @@ A pitch that is turned down moves to **Dropped**, so it stays on record and out 
 
 ## Proposed Postgres schema
 
-Fifty-seven tables: thirty-nine for content (eleven of them templates) with `calendars` at the top and `videos` at the centre, seven for access, ten small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Fifty-nine tables: forty for content (eleven of them templates) with `calendars` at the top and `videos` at the centre, seven for access, eleven small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
 **Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, the freeze that stops a published workflow version from changing, and the check that only Ready gear is packed. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
@@ -902,17 +902,44 @@ CREATE UNIQUE INDEX ON appointment_people (appointment_id, user_id) WHERE archiv
 -- wears out or breaks on its own. A model is the kind of thing ('Sony FX3', 'Rode NTG5'); an item
 -- is one piece of it. Each item gets an asset tag number from the database, printed on a label
 -- and stuck on the gear, so nobody has to hunt for the maker's serial. Company-wide, like crews.
+-- Every model has a kind, and the kind's rank says what can hold what: a lower rank holds a
+-- higher one (a crate holds a case, a case holds a camera, a camera holds its battery). Ranks
+-- leave gaps so a new kind ('Pouch', 25) fits between. Consumables carry no asset tag.
+CREATE TABLE equipment_kinds (
+    pkid       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code       TEXT NOT NULL UNIQUE,
+    label      TEXT NOT NULL,
+    sort_order INT  NOT NULL,
+    is_active  BOOLEAN NOT NULL DEFAULT TRUE,
+    nest_rank  SMALLINT NOT NULL,
+    is_tagged  BOOLEAN  NOT NULL,           -- false = counted, never tracked piece by piece
+    UNIQUE (pkid, nest_rank, is_tagged)     -- copied onto each model below
+);
+INSERT INTO equipment_kinds (code, label, sort_order, nest_rank, is_tagged) VALUES
+    ('crate', 'Crate', 10, 10, TRUE),            ('case', 'Case or bag', 20, 20, TRUE),
+    ('gear', 'Gear', 30, 30, TRUE),              ('accessory', 'Accessory', 40, 40, TRUE),
+    ('consumable', 'Consumable', 50, 90, FALSE);  -- batteries, tape, gels
+
 CREATE TABLE equipment_models (
     pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT NOT NULL,
+    kind_id     UUID NOT NULL,
+    nest_rank   SMALLINT NOT NULL,          -- copy of the kind's
+    is_tagged   BOOLEAN  NOT NULL,          -- copy of the kind's
     notes       TEXT,
-    archived_at TIMESTAMPTZ
+    archived_at TIMESTAMPTZ,
+    FOREIGN KEY (kind_id, nest_rank, is_tagged)
+        REFERENCES equipment_kinds (pkid, nest_rank, is_tagged) ON UPDATE CASCADE,
+    UNIQUE (pkid, nest_rank, is_tagged),
+    UNIQUE (pkid, is_tagged)
 );
 CREATE UNIQUE INDEX ON equipment_models (lower(name)) WHERE archived_at IS NULL;
 
 CREATE TABLE equipment_items (
     pkid          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_id      UUID NOT NULL REFERENCES equipment_models(pkid),
+    nest_rank     SMALLINT NOT NULL,        -- copy of the model's
+    is_tagged     BOOLEAN NOT NULL DEFAULT TRUE CHECK (is_tagged),  -- consumables have no items
     asset_tag     BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY UNIQUE,  -- on the label; never reused
     serial_number TEXT,                     -- the maker's serial, if known
     nickname      TEXT,                     -- 'Camera B'
@@ -923,9 +950,32 @@ CREATE TABLE equipment_items (
     acquired_at   TIMESTAMPTZ,
     archived_at   TIMESTAMPTZ,              -- retired, sold or written off
     FOREIGN KEY (workflow_id, workflow_type) REFERENCES workflows (pkid, object_type),
-    FOREIGN KEY (workflow_id, state_id)      REFERENCES workflow_state_usage (workflow_id, state_id)
+    FOREIGN KEY (workflow_id, state_id)      REFERENCES workflow_state_usage (workflow_id, state_id),
+    FOREIGN KEY (model_id, nest_rank, is_tagged)
+        REFERENCES equipment_models (pkid, nest_rank, is_tagged) ON UPDATE CASCADE,
+    UNIQUE (pkid, nest_rank)                -- copied onto equipment_contents below
 );
 CREATE UNIQUE INDEX ON equipment_items (model_id, lower(serial_number));  -- even once retired
+
+-- What is inside or attached to what, and since when: a battery on a camera, the camera in its
+-- case, the case in a crate. A piece is in one place at a time. Each row carries both ranks and
+-- the holder must rank lower, so ranks only go up along a chain and nothing can end up inside
+-- itself, however deep. Changing a model's kind is refused if it would break that.
+CREATE TABLE equipment_contents (
+    pkid           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_id        UUID NOT NULL,
+    item_rank      SMALLINT NOT NULL,
+    container_id   UUID NOT NULL,
+    container_rank SMALLINT NOT NULL,
+    added_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    removed_at     TIMESTAMPTZ,
+    FOREIGN KEY (item_id, item_rank) REFERENCES equipment_items (pkid, nest_rank) ON UPDATE CASCADE,
+    FOREIGN KEY (container_id, container_rank)
+        REFERENCES equipment_items (pkid, nest_rank) ON UPDATE CASCADE,
+    CHECK (container_rank < item_rank),     -- so no loops
+    CHECK (removed_at IS NULL OR removed_at > added_at),
+    EXCLUDE USING gist (item_id WITH =, tstzrange(added_at, removed_at, '[)') WITH &&)  -- one place at a time
+);
 
 -- Wear and damage reports. Where an item has been is its packing history (package_items);
 -- this records what was found. An open issue shows on the problems report while the item is
@@ -989,7 +1039,9 @@ CREATE UNIQUE INDEX ON package_needs (package_id, model_id) WHERE archived_at IS
 
 -- The serial-numbered pieces actually in the crate. One exclusion constraint refuses a piece in
 -- two packages at overlapping times, whichever appointments they are for; moving an appointment
--- or reviving a package into a clash is refused too.
+-- or reviving a package into a clash is refused too. Packing a case packs everything in it as
+-- rows of their own, so each piece is still booked, checked and missed one by one; scanning the
+-- case out or in covers its contents in one go.
 CREATE TABLE package_items (
     pkid         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     package_id   UUID NOT NULL REFERENCES packages(pkid),
@@ -1011,6 +1063,20 @@ CREATE TABLE package_items (
 );
 CREATE UNIQUE INDEX ON package_items (package_id, item_id) WHERE archived_at IS NULL;
 
+-- Consumables are counted lines on the checklist ('AA battery: 4'), ticked as they go in. They
+-- are used up, so they are not checked back in; the crate goes to Needs restocking instead.
+CREATE TABLE package_supplies (
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    package_id  UUID NOT NULL REFERENCES packages(pkid),
+    model_id    UUID NOT NULL,
+    is_tagged   BOOLEAN NOT NULL DEFAULT FALSE CHECK (NOT is_tagged),  -- consumables only
+    quantity    INT  NOT NULL CHECK (quantity > 0),                    -- how many went in
+    packed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived_at TIMESTAMPTZ,
+    FOREIGN KEY (model_id, is_tagged) REFERENCES equipment_models (pkid, is_tagged) ON UPDATE CASCADE
+);
+CREATE UNIQUE INDEX ON package_supplies (package_id, model_id) WHERE archived_at IS NULL;
+
 -- The kits a video will need ('Interview kit'), usually copied from its video template. When
 -- the video gets an appointment, its packages are packed from these.
 CREATE TABLE video_kits (
@@ -1022,30 +1088,22 @@ CREATE TABLE video_kits (
 CREATE UNIQUE INDEX ON video_kits (video_id, package_template_id) WHERE archived_at IS NULL;
 
 -- A kit is a real, persistent crate ('Interview kit A') that keeps its gear between jobs. It
--- names the kit list it should hold. kit_items says which items live in it, when; an item is in
--- one kit at a time, and repacking it into another kit ends one row and starts the next.
+-- names the kit list it should hold. The crate is itself a tagged item, and what lives in it is
+-- whatever equipment_contents puts inside it (and inside its cases) right now.
 CREATE TABLE kits (
     pkid                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name                TEXT NOT NULL,
+    container_id        UUID NOT NULL REFERENCES equipment_items(pkid),  -- the crate
     package_template_id UUID NOT NULL REFERENCES package_templates(pkid),  -- what it should hold
     notes               TEXT,
     archived_at         TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX ON kits (lower(name)) WHERE archived_at IS NULL;
-
-CREATE TABLE kit_items (
-    pkid       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kit_id     UUID NOT NULL REFERENCES kits(pkid),
-    item_id    UUID NOT NULL REFERENCES equipment_items(pkid),
-    added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    removed_at TIMESTAMPTZ,
-    CHECK (removed_at IS NULL OR removed_at > added_at),
-    EXCLUDE USING gist (item_id WITH =, tstzrange(added_at, removed_at, '[)') WITH &&)  -- one kit at a time
-);
+CREATE UNIQUE INDEX ON kits (container_id) WHERE archived_at IS NULL;   -- one kit per crate
 
 -- Booking a kit makes a package for the appointment from it: its kit list becomes the package's
--- needs and the items in it now are packed (all must be Ready, see the trigger). This row says
--- which kit a package came from, so the kit's booking history can be shown.
+-- needs and the crate and everything in it now are packed (all must be Ready, see the trigger).
+-- This row says which kit a package came from, so the kit's booking history can be shown.
 CREATE TABLE kit_bookings (
     pkid       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     package_id UUID NOT NULL UNIQUE REFERENCES packages(pkid),   -- a package is one kit at most
@@ -1211,10 +1269,11 @@ BEGIN
                              'segment_assets', 'publications', 'milestones',
                              'series_cadences', 'cadence_times', 'appointments', 'resources',
                              'appointment_resources', 'crews', 'crew_members', 'appointment_people',
-                             'equipment_models', 'equipment_items', 'equipment_issues',
+                             'equipment_kinds', 'equipment_models', 'equipment_items', 'equipment_issues',
+                             'equipment_contents', 'package_supplies',
                              'package_templates', 'package_template_items', 'packages',
                              'package_needs', 'package_items', 'video_kits', 'video_template_kits',
-                             'kits', 'kit_items', 'kit_bookings',
+                             'kits', 'kit_bookings',
                              'workflows', 'workflow_transitions', 'video_templates', 'segment_templates',
                              'video_template_segments', 'video_template_assets',
                              'segment_template_assets', 'milestone_templates',
@@ -1388,17 +1447,19 @@ SELECT v.calendar_id, v.pkid, 'asset_late', a.pkid, a.name, v.finish_at - u.need
    AND v.finish_at - u.needed_before < now()
 UNION ALL
 SELECT v.calendar_id, v.pkid, 'package_short', pn.pkid,
-       p.name || ': ' || m.name || ' ' || count(pi.pkid) || ' of ' || pn.quantity, a.starts_at
+       p.name || ': ' || m.name || ' ' || got.n || ' of ' || pn.quantity, a.starts_at
   FROM package_needs pn
   JOIN packages p          ON p.pkid = pn.package_id AND p.archived_at IS NULL
   JOIN appointments a      ON a.pkid = p.appointment_id AND a.archived_at IS NULL
   JOIN videos v            ON v.pkid = a.video_id AND v.archived_at IS NULL
   JOIN equipment_models m  ON m.pkid = pn.model_id
-  LEFT JOIN package_items pi ON pi.package_id = p.pkid AND pi.archived_at IS NULL
-                            AND pi.item_id IN (SELECT pkid FROM equipment_items WHERE model_id = pn.model_id)
- WHERE pn.archived_at IS NULL AND a.ends_at > now()
- GROUP BY v.calendar_id, v.pkid, pn.pkid, p.name, m.name, pn.quantity, a.starts_at
-HAVING count(pi.pkid) < pn.quantity
+  CROSS JOIN LATERAL (SELECT CASE WHEN m.is_tagged             -- pieces packed, or count ticked
+           THEN (SELECT count(*) FROM package_items pi JOIN equipment_items i ON i.pkid = pi.item_id
+                  WHERE pi.package_id = p.pkid AND pi.archived_at IS NULL AND i.model_id = m.pkid)
+           ELSE (SELECT COALESCE(sum(s.quantity), 0) FROM package_supplies s
+                  WHERE s.package_id = p.pkid AND s.archived_at IS NULL AND s.model_id = m.pkid)
+           END::int AS n) got
+ WHERE pn.archived_at IS NULL AND a.ends_at > now() AND got.n < pn.quantity
 UNION ALL
 SELECT DISTINCT v.calendar_id, v.pkid, 'gear_has_issue', i.pkid,
        m.name || ' #' || i.asset_tag || ': ' || ei.description, a.starts_at
@@ -1498,7 +1559,7 @@ CREATE INDEX ON appointments      (video_id)                  WHERE archived_at 
 CREATE INDEX ON appointment_resources (resource_id);
 CREATE INDEX ON crew_members (user_id);
 CREATE INDEX ON package_items (item_id);
-CREATE INDEX ON kit_items (item_id);
+CREATE INDEX ON equipment_contents (container_id);
 ```
 
 A typical read, listing the videos the logged-in user may see on the calendar:
@@ -1654,11 +1715,14 @@ Gear is tracked piece by piece, because there may be several of the same camera 
 - **Gear can't be in two places at once.** An item can't be in two packages whose appointments overlap in time. Moving an appointment into a clash or bringing back an archived package is refused too. Archiving a package or its appointment unpacks the gear.
 - **History and damage.** Every package an item was in stays on record, so you can see where it went, and wear or damage is logged as an issue on the item. The problems report flags a package that is short of what it needs, and packed gear with an open issue, for appointments still to come.
 
-* **Check out and check in.** Every packed item is scanned out by its asset tag when the crate leaves for the shoot and scanned back in afterwards; the database won't let an item be checked out before it is packed, or checked in before it was checked out, and the audit log records who did each. The problems report flags gear not yet checked out once a shoot has started, and gear checked out but not back once it has ended, naming the shoot, so nothing goes missing without a trace. An item that doesn't come back is moved to Missing.
+* **Check out and check in.** Every packed item is scanned out by its asset tag when the crate leaves for the shoot and scanned back in afterwards; the database won't let an item be checked out before it is packed, or checked in before it was checked out, and the audit log records who did each. The problems report flags gear not yet checked out once a shoot has started, and gear checked out but not back once it has ended, naming the shoot, so nothing goes missing without a trace. An item that doesn't come back is moved to Missing. Scanning a crate or case covers everything in it, so check-in shows its contents ticked and the person unticks whatever isn't there.
 
 - **Gear has a workflow.** Each item is Ready, Out on a job, Needs cleaning, Needs restocking (reusables replaced), Damaged, or Out for repair, and moves only along the allowed steps, just like videos. Damage is flagged by moving the item to Damaged and logging what happened as an issue; gear that doesn't come back from a shoot goes to Missing until it is found. The gear workflow is versioned and editable like the others.
 - **Only Ready gear can be packed.** The database refuses to pack an item in any other state, so a kit can't be booked while any of its gear is damaged, dirty or out for repair. Gear that breaks after it was packed stays packed and shows on the problems report as not ready.
-- **Kits are persistent.** A **kit** is a real crate, such as Interview kit A, that keeps its gear between jobs. It names the kit list it should hold, and its contents are dated, so an item is in one kit at a time and moving it to another kit is a repack with a history. Booking a kit for an appointment makes a package from it in one step: the kit list becomes the needs and the items in the kit now are packed.
+- **Kits are persistent.** A **kit** is a real crate, such as Interview kit A, that keeps its gear between jobs. It names the kit list it should hold. The crate is itself a tagged item, and the kit is whatever is inside it now, cases and all; moving gear to another crate is a repack with a history. Booking a kit for an appointment makes a package from it in one step: the kit list becomes the needs, and the crate with everything in it is packed.
+
+* **Accessories and nesting.** Gear has all sorts of bits that go with it. Every model has a **kind**: crate, case or bag, gear, accessory, or consumable. Tagged pieces can sit inside or attach to another piece: a battery and lens on a camera, the camera in its bag, the bag in a crate. Each piece is in one place at a time, and the record is dated, so its history shows. Each kind has a rank, and a piece can only go into one of lower rank (a crate holds a case, a case holds a camera, a camera holds its battery). Ranks only go up along a chain, so the database can't record anything inside itself, however deep, without needing a trigger. Packing a case packs everything in it, each piece still booked, checked out and missed on its own; scanning the case covers them all at once.
+* **Consumables are counted.** Batteries, tape and gels have no asset tag. They are lines on the kit list (4 × AA) that are ticked with how many went in. They are used up, so they are not checked back in; the crate goes to Needs restocking instead. The database refuses a tagged model as a consumable line, and refuses an asset tag on a consumable.
 
 ```sql
 -- Pack from template: copy package template $2's kit list into new package $1.
@@ -1670,23 +1734,29 @@ SELECT $1, model_id, quantity
 
 ```sql
 -- Crate checklist for package $1, on screen or printed: each needed model with how many, then
--- the asset tags packed against it. Gear packed beyond the list shows with needed = 0.
+-- the asset tags packed against it and what each sits in, so a case's contents print under it.
+-- Gear packed beyond the list shows with needed = 0. Consumables show the count ticked.
 SELECT m.name AS model, COALESCE(n.quantity, 0) AS needed,
-       i.asset_tag, i.nickname, pi.packed_at, pi.checked_out_at, pi.checked_in_at
+       i.asset_tag, i.nickname, inside.asset_tag AS inside_tag, pi.packed_at,
+       pi.checked_out_at, pi.checked_in_at, s.quantity AS supplies_packed
   FROM (SELECT model_id, quantity FROM package_needs WHERE package_id = $1 AND archived_at IS NULL) n
   FULL JOIN (SELECT pi.*, i.model_id FROM package_items pi
                JOIN equipment_items i ON i.pkid = pi.item_id
               WHERE pi.package_id = $1 AND pi.archived_at IS NULL) pi ON pi.model_id = n.model_id
   JOIN equipment_models m ON m.pkid = COALESCE(n.model_id, pi.model_id)
   LEFT JOIN equipment_items i ON i.pkid = pi.item_id
+  LEFT JOIN equipment_contents c ON c.item_id = i.pkid AND c.added_at <= now()
+                                AND (c.removed_at IS NULL OR c.removed_at > now())
+  LEFT JOIN equipment_items inside ON inside.pkid = c.container_id
+  LEFT JOIN package_supplies s ON s.package_id = $1 AND s.model_id = m.pkid AND s.archived_at IS NULL
  ORDER BY m.name, i.asset_tag;
 ```
 
 ```sql
 -- Book kit $2 onto new package $1, in one statement: record the booking, copy the kit list into
--- the package's needs, and pack the items in the kit now. If any item is not Ready, the trigger
--- refuses the whole statement.
-WITH b AS (
+-- the package's needs, and pack the crate with everything inside it now, cases and all. If any
+-- piece is not Ready, the trigger refuses the whole statement.
+WITH RECURSIVE b AS (
     INSERT INTO kit_bookings (package_id, kit_id) VALUES ($1, $2) RETURNING package_id, kit_id
 ), n AS (
     INSERT INTO package_needs (package_id, model_id, quantity)
@@ -1694,13 +1764,51 @@ WITH b AS (
       FROM b JOIN kits k ON k.pkid = b.kit_id
       JOIN package_template_items ti ON ti.package_template_id = k.package_template_id
                                     AND ti.archived_at IS NULL
+), tree AS (
+    SELECT k.container_id AS item_id FROM b JOIN kits k ON k.pkid = b.kit_id
+    UNION ALL
+    SELECT c.item_id FROM tree t
+      JOIN equipment_contents c ON c.container_id = t.item_id AND c.added_at <= now()
+                               AND (c.removed_at IS NULL OR c.removed_at > now())
 )
 INSERT INTO package_items (package_id, item_id, period, package_live)
-SELECT p.pkid, ki.item_id, p.period, p.is_live
-  FROM b
-  JOIN packages p   ON p.pkid = b.package_id
-  JOIN kit_items ki ON ki.kit_id = b.kit_id AND ki.added_at <= now()
-                   AND (ki.removed_at IS NULL OR ki.removed_at > now());
+SELECT p.pkid, t.item_id, p.period, p.is_live
+  FROM b JOIN packages p ON p.pkid = b.package_id
+ CROSS JOIN tree t;
+```
+
+```sql
+-- Pack item $2 into package $1 with everything inside or attached to it now: a case brings its
+-- gear, a camera brings its battery and lens.
+WITH RECURSIVE tree AS (
+    SELECT $2::uuid AS item_id
+    UNION ALL
+    SELECT c.item_id FROM tree t
+      JOIN equipment_contents c ON c.container_id = t.item_id AND c.added_at <= now()
+                               AND (c.removed_at IS NULL OR c.removed_at > now())
+)
+INSERT INTO package_items (package_id, item_id, period, package_live, packed_at)
+SELECT p.pkid, t.item_id, p.period, p.is_live, now()
+  FROM packages p CROSS JOIN tree t
+ WHERE p.pkid = $1;
+```
+
+```sql
+-- Scan case $2 back in for package $1: it and its contents are checked in in one go, except the
+-- asset tags in $3 that the person unticked as not there. Those stay out and go on the report.
+-- Checking out is the same statement with checked_out_at.
+WITH RECURSIVE tree AS (
+    SELECT $2::uuid AS item_id
+    UNION ALL
+    SELECT c.item_id FROM tree t
+      JOIN equipment_contents c ON c.container_id = t.item_id AND c.added_at <= now()
+                               AND (c.removed_at IS NULL OR c.removed_at > now())
+)
+UPDATE package_items pi SET checked_in_at = now()
+  FROM tree t JOIN equipment_items i ON i.pkid = t.item_id
+ WHERE pi.package_id = $1 AND pi.item_id = t.item_id AND pi.archived_at IS NULL
+   AND pi.checked_out_at IS NOT NULL AND pi.checked_in_at IS NULL
+   AND i.asset_tag <> ALL ($3::bigint[]);
 ```
 
 ```sql
@@ -1929,7 +2037,8 @@ These rules come from the data model and will surprise people unless the help pa
 * **Packing for a shoot.** Pick a package template, adjust the list, then pack items by their asset tags, ticking each one off on screen as it goes in (or print the checklist for the crate). New gear gets its asset tag when it is added; print the label and stick it on. Gear already packed for an overlapping appointment is refused; log any wear or damage on the item.
 * **Check out, check in.** Scan each item's tag as the crate leaves for a shoot and again when it comes back. Anything not back shows on the problems report with the shoot it went to; mark it Missing until it turns up.
 * **Gear states.** After a job, mark each item Back (all good), Needs cleaning or Needs restocking; report damage to move it to Damaged, then Out for repair. Only Ready gear can be packed.
-* **Kits stay packed.** Book a whole kit to a shoot in one step. If anything in it isn't Ready, swap it for a Ready item (a repack) or fix it first.
+* **Kits stay packed.** Book a whole kit to a shoot in one step, cases and all. If anything in it isn't Ready, swap it for a Ready item (a repack) or fix it first.
+* **Cases, accessories, consumables.** Put batteries and lenses on their camera, the camera in its bag and the bag in its crate; then packing or scanning the outer one brings everything inside along. Tick consumables with how many went in, and restock the crate when it comes back.
 
 - **Workflows have versions.** Pick a workflow from the list when you create a video; a template usually picks it for you. Changing a workflow makes a new version. Videos already under way stay on the version they started with unless an admin moves them, and a move never changes their current stage.
 
@@ -1989,3 +2098,4 @@ Added after your notes on shared access, auditing and the calendar:
 * [ ] **Q38. What can crew members see?** Answered: crew members see only their own bookings; a crew lead sees every booking of the people on the crews they lead. Anything more about the video still needs read access to it.
 * [ ] **Q39. Should video templates carry appointments and kit lists,** so a new episode comes with its shoot and package templates ready? Answered: video templates carry kits, copied to each new video. Shoots themselves aren't templated yet.
 * [ ] **Q40. Should gear with an open issue be blocked from packing?** Answered: gear has its own workflow (Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair), only Ready gear can be packed, and kits are persistent crates.
+* [ ] **Q41. Count consumables back in?** Should leftover batteries and tape be counted when a crate comes back, to track what was used? \[No, for now: restocking the crate covers it.\]
