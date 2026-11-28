@@ -478,7 +478,7 @@ ALTER TABLE users
     ADD COLUMN time_zone_id         UUID NOT NULL   -- times on screen are shown in this zone
         REFERENCES time_zones(pkid),                -- (0001 holds only test users; clear them first)
     ALTER COLUMN email              DROP NOT NULL,  -- notifications only; duplicates allowed
-    ALTER COLUMN password_hash      DROP NOT NULL,  -- Argon2id PHC string (per-user salt inside)
+    ALTER COLUMN password_hash      DROP NOT NULL,  -- one per user: Argon2id PHC string, salt inside
     ADD COLUMN can_login            BOOLEAN NOT NULL DEFAULT TRUE,   -- FALSE = not a login account
     ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
     ADD COLUMN password_changed_at  TIMESTAMPTZ,
@@ -493,6 +493,15 @@ ALTER TABLE users
     ADD COLUMN employment           TSTZRANGE       -- computed; copied into every dated row below
         GENERATED ALWAYS AS (tstzrange(started_at, ended_at, '[)')) STORED,
     ADD CONSTRAINT users_no_password_unless_login CHECK (can_login OR password_hash IS NULL),
+    -- Only a salted Argon2id hash fits: $argon2id$v=19$m=..,t=..,p=..$<salt>$<hash>, with the
+    -- salt (16 random bytes, new each time the password is set) and the hash in base64. Argon2id
+    -- is a deliberately slow, memory-hard one-way password hash; the cost must be at least the
+    -- OWASP minimum (19 MiB of memory, 2 passes), which is what password-auth uses by default.
+    -- A plain password, a fast hash (MD5, SHA), an unsalted or a cheap hash is refused.
+    ADD CONSTRAINT users_password_is_salted_argon2id CHECK (password_hash IS NULL OR (password_hash
+        ~ '^\$argon2id\$v=19\$m=[0-9]{1,8},t=[0-9]{1,3},p=[0-9]{1,3}\$[A-Za-z0-9+/]{22,}\$[A-Za-z0-9+/]{43,}$'
+        AND substring(password_hash FROM ',t=([0-9]+),')::int >= 2
+        AND substring(password_hash FROM '\$m=([0-9]+),')::int >= 19456)),
     ADD CONSTRAINT users_dates_ok CHECK (ended_at IS NULL OR ended_at > started_at),
     ADD CONSTRAINT users_pkid_employment UNIQUE (pkid, employment),  -- target for 'inside employment' keys
     DROP CONSTRAINT users_email_key,
@@ -1914,7 +1923,7 @@ Only admins create users; there is no sign-up page. People sign in with a login 
 | Login name | `login_name` | Assigned by an admin. Unique among users whose employment periods overlap. |
 | Display name | `display_name` | The name shown in the app and the audit log. |
 | Email | `email` | Optional, for notifications only. Duplicates allowed. |
-| Password | `password_hash` | Argon2id one-way hash in PHC format, which embeds a random salt per user. Empty until a password is set. |
+| Password | `password_hash` | One per user: an Argon2id one-way hash in PHC format, carrying its own random 16-byte salt, new each time the password is set. The database accepts only that format. Empty until a password is set. |
 | Login account | `can_login` | Off for people tracked in the app who never sign in, such as an outside voice-over artist. They can have no password. |
 | Must change password | `must_change_password` | Forces a new password at next sign-in. On for every new user and after every admin reset. |
 | Locked | `locked_at`, `locked_by`, `locked_reason` | Set by an admin. Blocks sign-in until an admin clears it. |
@@ -1931,7 +1940,7 @@ Sign-in succeeds only when all of these hold: the login name matches a user whos
 
 ### Passwords
 
-- Hashed with Argon2id through the `password-auth` crate the repo already uses; each hash carries its own random salt. Nothing reversible is ever stored, and passwords never appear in logs or the audit log.
+- Hashed with Argon2id through the `password-auth` crate the repo already uses. Argon2id is a one-way password hash built to be slow and memory-hungry, so guessing is expensive even with stolen hashes; it is the first choice of OWASP, unlike fast hashes such as MD5 or SHA-256. Each user has one hash, in users.password\_hash. Its salt is 16 random bytes, made fresh every time the password is set, so two people with the same password still get different hashes. The salt is stored inside the hash string itself ($argon2id$v=19$m=19456,t=2,p=1$\<salt>$\<hash>), which is the standard PHC format: there is no separate salt column to keep in step, and checking a password reads the salt back out of the string. The database refuses anything else in that column, such as a plain password, a fast or unsalted hash, another algorithm, or Argon2id set cheaper than 19 MiB of memory and 2 passes (the OWASP minimum, and the crate's default). Nothing reversible is ever stored, and passwords never appear in logs or the audit log.
 - Decent passwords are enforced on every set or change, following NIST SP 800-63B: at least 12 characters and at most 128; any characters including spaces, so passphrases work; no forced mix of symbols and digits; refused if it appears in a list of known-breached passwords, contains the login name or display name, or scores below 3 of 4 on the zxcvbn strength check (guess on the thresholds). The form says which rule failed. Passwords never expire.
 - An admin reset generates a random temporary password, shows it to the admin once, stores only its hash, turns on `must_change_password` and ends the user's open sessions.
 - Self-service reset by email is left out for now, since emails are not unique (Q24).
