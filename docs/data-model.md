@@ -33,7 +33,7 @@ These are the terms the app will use in its screens and its code. The last colum
 | Appointment | Something booked at a fixed time, such as a shoot with a guest or a studio slot. Unlike a milestone it stays put when the finish date moves, but it has a T-minus: how long before the finish it must be over. | `appointments` |
 | Resource | A studio or room that can only be in one time slot at a time. Appointments book resources, and a resource can never be booked into overlapping times. Locations don't clash. | `resources, appointment_resources` |
 | Crew | A named team of users, such as Crew A. Booking a crew books each person on it, so people see their own appointments (a crew lead sees the whole crew's), and nobody can be in two overlapping time slots even if they are on two crews. | `crews, crew_members, appointment_people` |
-| Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. Each item moves through a workflow: Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair, Missing. Every model has a kind (crate, case or bag, gear, accessory, consumable): pieces sit inside or attach to others (a battery on a camera, the camera in its bag, the bag in a crate), and consumables such as AA batteries are counted, not tagged. | `equipment_kinds, equipment_models, equipment_items, equipment_contents, equipment_issues` |
+| Equipment model / item | A model is a kind of gear (Sony FX3). An item is one piece of it with its own asset tag number, printed on a label, and is tracked on its own so wear, damage and where it has been are known. Each item moves through a workflow: Ready, Out on a job, Needs cleaning, Needs restocking, Damaged, Out for repair, Missing. Every model has a kind (crate, case or bag, gear, accessory, consumable): pieces sit inside or attach to others (a battery on a camera, the camera in its bag, the bag in a crate), and consumables such as AA batteries are counted, not tagged. Each item can have a storage location, its home between jobs. | `equipment_kinds, equipment_models, equipment_items, equipment_contents, equipment_issues`, storage\_locations |
 | Package template | A kit list for a kind of job, such as Interview kit: models and how many, never serial numbers. Video templates can bring kits along. The same gear can be packed by many templates. | `package_templates, package_template_items` |
 | Package | One crate packed for one appointment: what it needs (copied from a template) and the tagged items and counted consumables actually in it. Ticked off on screen as it is packed, and prints as a checklist. An item can't be in two packages at overlapping times. | `packages, package_needs, package_items`, package\_supplies |
 | Kit | A real, persistent crate (Interview kit A) that keeps its gear between jobs and names the kit list it should hold. The crate is itself a tagged item, and the kit is whatever is inside it now. Booking a kit packs the crate and everything in it for an appointment. | `kits, kit_bookings` |
@@ -154,7 +154,7 @@ A pitch that is turned down moves to **Dropped**, so it stays on record and out 
 
 ## Proposed Postgres schema
 
-Sixty-one tables: forty for content (eleven of them templates) with `calendars` at the top and `videos` at the centre, eight for access, twelve small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
+Sixty-two tables: forty-one for content (eleven of them templates) with `calendars` at the top and `videos` at the centre, eight for access, twelve small lookup and workflow tables, and one append-only audit log. No table names a company: each company has its own installation and database, and its name and home time zone are settings. The calendar is drawn from one stored plan date, `videos.finish_at`: milestones, asset needs and go-live times are offsets from it, worked out by the `calendar_entries` view.
 
 **Design rule: the database must not be able to hold data that makes no sense.** Wherever possible the structure itself rules a bad state out: required links instead of optional ones, separate tables instead of a column that means "one of two things", composite foreign keys so related rows must share a calendar or company, and CHECK, UNIQUE and exclusion constraints for everything else. A trigger is used only when a rule truly cannot be written that way; today that is the audit log, the no-delete guard, the check that a state change follows its workflow, the freeze that stops a published workflow version from changing, and the check that only Ready gear is packed. App code and screens may get more complex to keep admins' lives easy, but they never replace a database rule. They only add friendly checks in front of it.
 
@@ -983,6 +983,15 @@ CREATE TABLE equipment_models (
 );
 CREATE UNIQUE INDEX ON equipment_models (lower(name)) WHERE archived_at IS NULL;
 
+-- Where gear is kept between jobs: a room, shelf, cage or bin ('Gear room, shelf B3').
+CREATE TABLE storage_locations (
+    pkid        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    notes       TEXT,                       -- 'top shelf, left of the door'
+    archived_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX ON storage_locations (lower(name)) WHERE archived_at IS NULL;
+
 CREATE TABLE equipment_items (
     pkid          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_id      UUID NOT NULL REFERENCES equipment_models(pkid),
@@ -995,6 +1004,9 @@ CREATE TABLE equipment_items (
     workflow_type object_type NOT NULL DEFAULT 'equipment' CHECK (workflow_type = 'equipment'),
     state_id      UUID NOT NULL REFERENCES workflow_states(pkid),  -- Ready, Out on a job,
                                             -- Needs cleaning, Needs restocking, Damaged, Out for repair
+    storage_location_id UUID REFERENCES storage_locations(pkid),  -- its home between jobs;
+                                            -- NULL = it lives in whatever holds it (a lens in its
+                                            -- camera bag), so it is kept where that is kept
     acquired_at   TIMESTAMPTZ,
     archived_at   TIMESTAMPTZ,              -- retired, sold or written off
     FOREIGN KEY (workflow_id, workflow_type) REFERENCES workflows (pkid, object_type),
@@ -1318,7 +1330,7 @@ BEGIN
                              'series_cadences', 'cadence_times', 'appointments', 'resources',
                              'appointment_resources', 'crews', 'crew_members', 'appointment_people',
                              'equipment_kinds', 'equipment_models', 'equipment_items', 'equipment_issues',
-                             'equipment_contents', 'package_supplies',
+                             'equipment_contents', 'package_supplies', 'storage_locations',
                              'package_templates', 'package_template_items', 'packages',
                              'package_needs', 'package_items', 'video_kits', 'video_template_kits',
                              'kits', 'kit_bookings',
@@ -1620,6 +1632,7 @@ CREATE INDEX ON appointment_resources (resource_id);
 CREATE INDEX ON crew_members (user_id);
 CREATE INDEX ON package_items (item_id);
 CREATE INDEX ON equipment_contents (container_id);
+CREATE INDEX ON equipment_items (storage_location_id);
 ```
 
 A typical read, listing the videos the logged-in user may see on the calendar:
@@ -1768,7 +1781,7 @@ SELECT DISTINCT u.display_name, a.pkid, a.name, a.starts_at, a.ends_at, a.locati
 
 Gear is tracked piece by piece, because there may be several of the same camera and each one wears out or breaks on its own.
 
-- **Models and items.** A **model** is a kind of gear (Sony FX3); an **item** is one piece of it. The system gives every item its own asset tag number to print on a labeler and stick on the gear, so nobody has to find the maker's serial number (which can still be recorded, and can't repeat within a model). Tags are never reused, even after an item is retired.
+- **Models and items.** A **model** is a kind of gear (Sony FX3); an **item** is one piece of it. The system gives every item its own asset tag number to print on a labeler and stick on the gear, so nobody has to find the maker's serial number (which can still be recorded, and can't repeat within a model). Tags are never reused, even after an item is retired. Each item can also have a storage location (Gear room, shelf B3), where it is kept between jobs. A piece that lives inside something else, such as a battery on its camera or a lens in its bag, can leave it empty: it is kept wherever its holder is kept, and the item page shows the whole path, such as Cage 2 > Crate A > Bag A.
 - **Package templates are kit lists** for a kind of job, such as "Interview kit: 2 × Sony FX3, 1 × Rode NTG5". They name models, not serial numbers, so the same gear can be repacked into different packages for different kinds of work.
 - **A package is one crate for one appointment.** Packing from a template copies its list into the package's needs, which can then be changed. A video template can bring its kits along, so a new video already lists the kits its shoots will need. Then real items are packed against it. The checklist lives on screen: ticking an item as it goes in the crate records when (and the audit log records who), so anyone can see how far packing has got. It also prints for the crate: each model, how many are needed, and the asset tags packed, with a box to tick.
 - **Gear can't be in two places at once.** An item can't be in two packages whose appointments overlap in time. Moving an appointment into a clash or bringing back an archived package is refused too. Archiving a package or its appointment unpacks the gear.
@@ -1880,6 +1893,28 @@ SELECT a.starts_at, a.ends_at, a.name AS appointment, a.location, v.working_titl
   JOIN videos v       ON v.pkid = a.video_id
  WHERE pi.item_id = $1
  ORDER BY a.starts_at DESC;
+```
+
+```sql
+-- Where is item $1 kept? Its own storage location, or else that of the nearest thing holding
+-- it now (a battery on a camera in a bag on shelf B3 is kept on shelf B3). The path shows what
+-- it sits in, so the label reads 'Shelf B3 > Bag A > Camera B'.
+WITH RECURSIVE up AS (
+    SELECT i.pkid, i.storage_location_id, 0 AS depth, ARRAY[]::text[] AS path
+      FROM equipment_items i WHERE i.pkid = $1
+    UNION ALL
+    SELECT h.pkid, h.storage_location_id, up.depth + 1,
+           COALESCE(h.nickname, '#' || h.asset_tag) || up.path
+      FROM up
+      JOIN equipment_contents c ON c.item_id = up.pkid AND c.added_at <= now()
+                               AND (c.removed_at IS NULL OR c.removed_at > now())
+      JOIN equipment_items h ON h.pkid = c.container_id
+     WHERE up.storage_location_id IS NULL
+)
+SELECT sl.name AS kept_at, array_to_string(up.path, ' > ') AS inside
+  FROM up LEFT JOIN storage_locations sl ON sl.pkid = up.storage_location_id
+ ORDER BY (up.storage_location_id IS NULL), up.depth
+ LIMIT 1;
 ```
 
 ### Templates
@@ -2092,7 +2127,7 @@ These rules come from the data model and will surprise people unless the help pa
 * **A crew can't be in two time slots at once.** Booking a person (directly or through a crew), a studio or a piece of gear that is already booked at an overlapping time is refused, even when the person is on two crews. Archive the other booking first, or pick another time. Two shoots at the same location are fine.
 * **My appointments.** Everyone sees their own bookings, with time and place, on one page. Crew leads also see every booking of their crew.
 * **Ending someone with bookings ahead.** Archive or reassign their future bookings first; the database won't let a booking sit outside someone's employment.
-* **Packing for a shoot.** Pick a package template, adjust the list, then pack items by their asset tags, ticking each one off on screen as it goes in (or print the checklist for the crate). New gear gets its asset tag when it is added; print the label and stick it on. Gear already packed for an overlapping appointment is refused; log any wear or damage on the item.
+* **Packing for a shoot.** Pick a package template, adjust the list, then pack items by their asset tags, ticking each one off on screen as it goes in (or print the checklist for the crate). New gear gets its asset tag when it is added; print the label and stick it on, and give it a storage location unless it lives inside a bag or case. Gear already packed for an overlapping appointment is refused; log any wear or damage on the item.
 * **Check out, check in.** Scan each item's tag as the crate leaves for a shoot and again when it comes back. Anything not back shows on the problems report with the shoot it went to; mark it Missing until it turns up.
 * **Gear states.** After a job, mark each item Back (all good), Needs cleaning or Needs restocking; report damage to move it to Damaged, then Out for repair. Only Ready gear can be packed.
 * **Kits stay packed.** Book a whole kit to a shoot in one step, cases and all. If anything in it isn't Ready, swap it for a Ready item (a repack) or fix it first.
